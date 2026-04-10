@@ -592,7 +592,7 @@ def run_simulation(args=None, return_data=False):
             axs[1, 1].plot(time, Risk[:, i], linewidth=1.0)
 
         axs[0, 0].set_xlim([0, args.sim_time])
-        axs[0, 0].set_ylabel(r'$DCPA$ (nmi)', fontsize=20)
+        axs[0, 0].set_ylabel(r'$d_{\mathrm{CPA}}$ (nmi)', fontsize=20)
         axs[0, 0].tick_params(axis='both', labelsize=15)
 
         axs[0, 1].set_xlim([0, args.sim_time])
@@ -602,14 +602,14 @@ def run_simulation(args=None, return_data=False):
 
         axs[1, 0].set_xlim([0, args.sim_time])
         axs[1, 0].set_xlabel('Time (s)', fontsize=20)
-        axs[1, 0].set_ylabel(r'$TCPA$ (s)', fontsize=20)
+        axs[1, 0].set_ylabel(r'$t_{\mathrm{CPA}}$ (s)', fontsize=20)
         axs[1, 0].tick_params(axis='both', labelsize=15)
         axs[1, 0].legend()
 
         axs[1, 1].set_xlim([0, args.sim_time])
         axs[1, 1].set_ylim([0, 1])
         axs[1, 1].set_xlabel('Time (s)', fontsize=20)
-        axs[1, 1].set_ylabel(r'$Risk$', fontsize=20)
+        axs[1, 1].set_ylabel(r'$q$', fontsize=20)
         axs[1, 1].tick_params(axis='both', labelsize=15)
 
         fig.suptitle(f'Case {args.case_number}', fontsize=20)
