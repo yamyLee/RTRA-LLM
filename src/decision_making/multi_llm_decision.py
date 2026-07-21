@@ -130,12 +130,33 @@ class MultiLLMCOLREGSInterpreter:
         self.provider = self._initialize_provider()
         self.system_prompt = self._load_system_prompt()
 
+    def _get_prompt_file_path(self) -> str:
+        """Return the absolute path to the unified prompt file."""
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        return os.path.join(project_root, "prompt", "prompt.txt")
+
     def _load_system_prompt(self) -> str:
-        """Return the built-in system prompt."""
-        return """You are a ship navigation officer. Based on the situation, give a simple decision in this format:
+        """Load system prompt from the unified offline prompt file."""
+        default_prompt = """You are a ship navigation officer. Based on the situation, give a simple decision in this format:
 Action: [Stand on / Give-way, turn to starboard / Give-way, turn to port]
 
 Situation:"""
+
+        try:
+            prompt_path = self._get_prompt_file_path()
+
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                prompt = f.read().strip()
+
+            if prompt:
+                return prompt
+
+            print(f"Warning: Prompt file is empty: {prompt_path}")
+            return default_prompt
+
+        except Exception as e:
+            print(f"Warning: Could not load system prompt from prompt/prompt.txt: {str(e)}")
+            return default_prompt
     
     def _initialize_provider(self) -> Optional[LLMProvider]:
         """Initialize the requested provider without extra fallback chains."""
@@ -182,9 +203,11 @@ Situation:"""
             )
 
         memory_block = f"\n{memory_context.strip()}\n" if memory_context else ""
+        prompt_ablation_variant = os.getenv("CORALL_PROMPT_ABLATION_VARIANT")
+        include_encounter_hint = prompt_ablation_variant is None
         encounter_block = (
             f"- Encounter type: {encounter_type}\n"
-            if encounter_type
+            if encounter_type and include_encounter_hint
             else ""
         )
 

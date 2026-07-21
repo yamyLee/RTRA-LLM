@@ -2,7 +2,7 @@
 # =============================================================================
 # scripts/run_paper_experiments.sh  ——  RTRA-LLM 一键运行批量实验
 # =============================================================================
-# 按顺序运行多模型对比和模块消融，所有结果保存到同一个带时间戳的输出目录。
+# 按顺序运行多模型对比、模块消融和提示词消融，所有结果保存到同一个带时间戳的输出目录。
 #
 # 用法：
 #   bash scripts/run_paper_experiments.sh [provider]
@@ -13,7 +13,7 @@
 #   PROVIDERS="deepseek zhipu" bash scripts/run_paper_experiments.sh  # 多模型对比使用多 provider
 #
 # 可通过环境变量定制：
-#   PROVIDER      模块消融的主提供商（默认 deepseek）
+#   PROVIDER      模块消融和提示词消融的主提供商（默认 deepseek）
 #   PROVIDERS     多模型对比的提供商列表（默认 "$PROVIDER zhipu"）
 #   SMOKE         1=冒烟测试模式
 #   SIM_TIME      仿真时长（默认 450s）
@@ -35,7 +35,7 @@ BASE_OUT="output/experiments/full_experiments_${PROVIDER}_${TS}"
 # ── 打印总计划 ────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║            CORALL  批量实验  (多模型 + 消融)                    ║"
+echo "║          CORALL  批量实验  (多模型 + 消融 + 提示词)             ║"
 echo "╠══════════════════════════════════════════════════════════════════╣"
 echo "║  Multi-model   : $PROVIDERS"
 echo "║  Main provider : $PROVIDER"
@@ -85,6 +85,17 @@ MODULE_ABLATION_CMD=(python3 run_module_ablation.py
 
 run_step "模块消融 (${PROVIDER})" "${MODULE_ABLATION_CMD[@]}"
 
+# ── 提示词消融 ───────────────────────────────────────────────────────────────
+PROMPT_ABLATION_CMD=(python3 run_prompt_ablation.py
+    --provider "$PROVIDER"
+    --sim_time "$SIM_TIME"
+    --output_dir "${BASE_OUT}/prompt_ablation"
+)
+[[ "$SMOKE" == "1" ]] && PROMPT_ABLATION_CMD+=(--smoke)
+[[ -n "$CASES" ]] && PROMPT_ABLATION_CMD+=(--cases $CASES)
+
+run_step "提示词消融 (${PROVIDER})" "${PROMPT_ABLATION_CMD[@]}"
+
 # ── 完成 ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
@@ -94,4 +105,5 @@ echo "║"
 echo "║  文件结构："
 echo "║    multi_model/      ── 多模型对比结果"
 echo "║    module_ablation/  ── 模块消融结果"
+echo "║    prompt_ablation/  ── 提示词消融结果"
 echo "╚══════════════════════════════════════════════════════════════════╝"

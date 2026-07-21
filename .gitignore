@@ -82,13 +82,8 @@ doc/
 docs/
 img/
 output/
-prompt/
 Simulation Results/
 skill/
 tmp/
 skills/
 officecli
-
-# Excluded experiment entry points
-run_prompt_ablation.py
-scripts/run_prompt_ablation.sh
