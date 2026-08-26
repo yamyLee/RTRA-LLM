@@ -2,8 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
 import argparse
+import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from src.navigation.planning import waypoint_selection, planning
 from src.dynamics.vessel_dynamics import vessel_dynamics
 from src.core.integration import integration
@@ -14,83 +16,81 @@ from src.dynamics.controller import controller
 from src.dynamics.actuator_modeling import actuator_modeling
 from src.risk_assessment.risk_calculations import risk_calculations
 from src.navigation.reactive_avoidance import reactive_avoidance
+from src.navigation.velocity_obstacle import velocity_obstacle_avoidance
 from src.visualization.animate import animate_step
-from src.utils.imazu_cases import get_obstacles, nautical_to_meters, obstacle_cases, get_obstacle_data
-import matplotlib.ticker as ticker
+from src.utils.imazu_cases import nautical_to_meters, get_obstacle_data
+from src.config.paper_parameters import (
+    ACTUATOR_SATURATION,
+    LLM_FIXED_INTERVAL_STEPS,
+    LLM_RISK_THRESHOLD,
+    PAPER_LOW_LEVEL_PLANNER,
+    OWN_SHIP_BEAM_M,
+    OWN_SHIP_CPA_MULTIPLIER,
+    OWN_SHIP_LENGTH_M,
+    OWN_SHIP_SPEED_MPS,
+    SIMULATION_DT_S,
+    SIMULATION_TIME_S,
+    RANDOM_SEED,
+    TARGET_SHIP_BEAM_M,
+    TARGET_SHIP_CPA_MULTIPLIER,
+    TARGET_SHIP_LENGTH_M,
+)
 # Optional LLM imports
 try:
-    from src.decision_making.multi_llm_decision import COLREGSInterpreter, VesselState
+    from src.decision_making.rtra_llm_supervisor import RiskTriggeredLLMSupervisor
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
-    COLREGSInterpreter = None
-    VesselState = None
-from typing import List, Union, Optional
+    RiskTriggeredLLMSupervisor = None
 
-def extract_kdir_from_response(response: str) -> int:
-    """
-    Extract K_dir from LLM response
-    Returns:
-        +1 for "turn starboard"
-        -1 for "turn port"
-        0 for "stand on" or default
-    """
-    response_lower = response.lower()
-    
-    if "turn starboard" in response_lower or "alter course to starboard" in response_lower or "starboard" in response_lower:
-        return 1
-    elif "turn port" in response_lower or "alter course to port" in response_lower or "port" in response_lower:
-        return -1
-    else:  # "stand on" or any other action
-        return 0
+METERS_TO_NMI = 1 / 1852
 
-def run_colm(risk: Union[float, List[float], np.ndarray],
-            distance: Union[float, List[float], np.ndarray],
-            bearing: Union[float, List[float], np.ndarray],
-            dcpa: Union[float, List[float], np.ndarray],
-            tcpa: Union[float, List[float], np.ndarray],
-            time_idx: int = 0,
-            provider: str = None) -> str:
-    """
-    Run COLM decision making for any number of vessels.
-    
-    Args:
-        risk: Risk value(s) for vessel(s)
-        distance: Distance(s) to vessel(s) in nautical miles
-        bearing: Relative bearing(s) to vessel(s) in degrees
-        dcpa: Distance at Closest Point of Approach in nautical miles
-        tcpa: Time to Closest Point of Approach in minutes
-        time_idx: Current time index (default: 0)
-    
-    Returns:
-        str: COLREGs decision with explanation
-    """
-    if not LLM_AVAILABLE:
-        return "LLM not available - using default behavior"
-    
-    # Convert inputs to numpy arrays if they aren't already
-    risk = np.atleast_1d(risk)
-    distance = np.atleast_1d(distance)
-    bearing = np.atleast_1d(bearing)
-    dcpa = np.atleast_1d(dcpa)
-    tcpa = np.atleast_1d(tcpa)
-    
-    # Create interpreter instance with specified provider
-    interpreter = COLREGSInterpreter(provider=provider)
-    
-    # Create vessel states
-    vessels = [
-        VesselState(float(r), float(d), float(b), float(dc), float(tc))
-        for r, d, b, dc, tc in zip(risk, distance, bearing, dcpa, tcpa)
-    ]
-    
-    # Get decision
-    return interpreter.make_decision(vessels, time_idx)
+def save_figure_with_type(fig, base_path, file_type, case_number, dpi=None):
+    """Save figure with proper directory structure based on file type."""
+    # Create directory structure
+    img_dir = Path("./img")
+    file_type_dir = img_dir / file_type
+    file_type_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save figure
+    if file_type == 'eps':
+        filepath = file_type_dir / f"{base_path}_{case_number}.eps"
+        fig.savefig(filepath, format='eps', bbox_inches='tight')
+    elif file_type == 'png':
+        filepath = file_type_dir / f"{base_path}_{case_number}.png"
+        fig.savefig(filepath, bbox_inches='tight', dpi=dpi)
+    elif file_type == 'gif':
+        filepath = file_type_dir / f"{base_path}_{case_number}.gif"
+        # For GIF, we need to use the animation writer
+        # This function is called outside the animation context
+        # So we'll just return the path
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")
+
+    return filepath
+
+def save_gif_with_type(output_path, file_type, case_number):
+    """Save GIF with proper directory structure."""
+    # Create directory structure
+    img_dir = Path("./img")
+    file_type_dir = img_dir / file_type
+    file_type_dir.mkdir(parents=True, exist_ok=True)
+
+    # Extract base name and create new path
+    base_name = os.path.basename(output_path)
+    new_path = file_type_dir / base_name
+
+    # If the file exists, move it
+    if os.path.exists(output_path):
+        os.makedirs(file_type_dir, exist_ok=True)
+        os.rename(output_path, new_path)
+
+    return new_path
 
 def load_env_file():
-    """Load environment variables from .env file if it exists."""
+    """Load environment variables from .env and config/api_keys.json if they exist."""
     env_file = Path(__file__).parent.parent.parent / '.env'
-    
+
     if env_file.exists():
         with open(env_file, 'r') as f:
             for line in f:
@@ -100,19 +100,187 @@ def load_env_file():
                         key, value = line.split('=', 1)
                         os.environ[key] = value
 
+    api_keys_file = Path(__file__).parent.parent.parent / 'config' / 'api_keys.json'
+    if not api_keys_file.exists():
+        return
+
+    try:
+        with open(api_keys_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except Exception as exc:
+        print(f"Warning: Could not load config/api_keys.json: {exc}")
+        return
+
+    if not isinstance(config, dict):
+        return
+
+    provider_hint = config.get("llm_provider") or config.get("provider") or config.get("default_provider")
+    if provider_hint:
+        os.environ["LLM_PROVIDER"] = str(provider_hint)
+
+    for key, value in config.items():
+        if key.isupper() and not isinstance(value, dict):
+            os.environ[key] = str(value)
+
+    field_map = {
+        "api_key": "API_KEY",
+        "key": "API_KEY",
+        "model": "MODEL",
+        "base_url": "BASE_URL",
+        "url": "BASE_URL",
+        "temperature": "TEMPERATURE",
+        "max_tokens": "MAX_TOKENS",
+    }
+    provider_entries = list(config.items())
+    for section_name in ("providers", "llm_providers", "api_keys"):
+        section = config.get(section_name)
+        if isinstance(section, dict):
+            provider_entries.extend(section.items())
+
+    for provider_name, provider_config in provider_entries:
+        if provider_name in {"providers", "llm_providers", "api_keys"}:
+            continue
+        prefix = provider_name.upper()
+        if isinstance(provider_config, str):
+            os.environ[f"{prefix}_API_KEY"] = provider_config
+            continue
+        if not isinstance(provider_config, dict):
+            continue
+        for source_key, env_suffix in field_map.items():
+            if source_key in provider_config and provider_config[source_key] is not None:
+                os.environ[f"{prefix}_{env_suffix}"] = str(provider_config[source_key])
+
+def should_show_debug():
+    """Check if debug output is enabled."""
+    return os.getenv("SHOW_LLM_DEBUG", "false").lower() == "true"
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Marine Vehicle Simulation')
     parser.add_argument('--case_number', type=int, default=1, help='Simulation case number')
-    parser.add_argument('--sim_time', type=float, default=450.0, help='Simulation time in seconds')
-    parser.add_argument('--dt', type=float, default=0.1, help='Time step size')
+    parser.add_argument('--all_cases', action='store_true', help='Run all supported Imazu cases')
+    parser.add_argument('--sim_time', type=float, default=SIMULATION_TIME_S, help='Simulation time in seconds')
+    parser.add_argument('--dt', type=float, default=SIMULATION_DT_S, help='Time step size')
     parser.add_argument('--no_animation', action='store_true', help='Disable animation')
     parser.add_argument('--output_dir', type=str, default='img/', help='Output directory for results')
     parser.add_argument('--llm', type=int, default=0, help='Use LLM for decision making (0=off, 1=on)')
     parser.add_argument('--llm_provider', type=str, default=None, 
-                       help='LLM provider to use (openai, claude). If not specified, uses LLM_PROVIDER from .env')
+                       help='OpenAI-compatible LLM provider to use (for example: openai, zhipu, qwen, deepseek, kimi). If not specified, uses LLM_PROVIDER from .env')
     parser.add_argument('--compare', action='store_true', 
                        help='Run comparison between LLM and baseline simulation')
+    parser.add_argument('--llm_trigger_mode', choices=['risk', 'fixed', 'always'], default='risk',
+                       help='LLM trigger strategy: risk=paper method, fixed=fixed-interval ablation, always=call every step')
+    parser.add_argument('--llm_risk_threshold', type=float, default=LLM_RISK_THRESHOLD,
+                       help='Risk threshold q for triggering LLM supervision')
+    parser.add_argument('--llm_fixed_interval', type=int, default=LLM_FIXED_INTERVAL_STEPS,
+                       help='Fixed trigger interval in simulation steps when --llm_trigger_mode fixed is used')
+    parser.add_argument('--low_level_planner', choices=['reactive', 'vo'], default=PAPER_LOW_LEVEL_PLANNER,
+                       help='Low-level planner used by the paper experiments')
+    parser.add_argument('--seed', type=int, default=RANDOM_SEED,
+                       help='Random seed for the stochastic vessel bias disturbance')
+    parser.add_argument('--disable_memory', action='store_true',
+                       help='Disable maneuver memory for ablation experiments')
+    parser.add_argument('--disable_rule_validator', action='store_true',
+                       help='Disable COLREGs-oriented rule validation for ablation experiments')
+    parser.add_argument('--rule_baseline', action='store_true',
+                       help='Use the deterministic Rule-trigger baseline instead of an LLM')
     return parser.parse_args()
+
+def ensure_arg_defaults(args):
+    """Fill new optional arguments when run_simulation is called programmatically."""
+    defaults = {
+        'compare': False,
+        'all_cases': False,
+        'llm_trigger_mode': 'risk',
+        'llm_risk_threshold': LLM_RISK_THRESHOLD,
+        'llm_fixed_interval': LLM_FIXED_INTERVAL_STEPS,
+        'disable_memory': False,
+        'disable_rule_validator': False,
+        'rule_baseline': False,
+        'llm': 0,
+        'llm_provider': None,
+        'output_dir': 'img/',
+        'no_animation': False,
+        'low_level_planner': PAPER_LOW_LEVEL_PLANNER,
+        'seed': RANDOM_SEED,
+    }
+    for key, value in defaults.items():
+        if not hasattr(args, key):
+            setattr(args, key, value)
+    return args
+
+def initialize_llm_supervisor(args):
+    """Create the risk-triggered LLM supervisor if LLM mode is enabled."""
+    if args.llm != 1:
+        return None
+    if args.rule_baseline:
+        return RiskTriggeredLLMSupervisor(
+            provider=None,
+            risk_threshold=args.llm_risk_threshold,
+            trigger_mode=args.llm_trigger_mode,
+            fixed_interval=args.llm_fixed_interval,
+            enable_memory=not args.disable_memory,
+            enable_validator=not args.disable_rule_validator,
+            rule_only=True,
+        )
+    if not LLM_AVAILABLE:
+        print("Warning: LLM requested but langchain_openai or RTRA supervisor is not available. Running without LLM.")
+        return None
+
+    supervisor = RiskTriggeredLLMSupervisor(
+        provider=args.llm_provider,
+        risk_threshold=args.llm_risk_threshold,
+        trigger_mode=args.llm_trigger_mode,
+        fixed_interval=args.llm_fixed_interval,
+        enable_memory=not args.disable_memory,
+        enable_validator=not args.disable_rule_validator,
+    )
+    if not supervisor.available:
+        print("Warning: LLM requested but provider is not configured. Running without LLM.")
+        return None
+    return supervisor
+
+def update_llm_supervisor(
+    supervisor,
+    risk,
+    distance,
+    bearing_rad,
+    dcpa_m,
+    tcpa_s,
+    step,
+    time_value,
+    distance_in_meters=True,
+    target_heading_rad=None,
+    own_heading_rad=None,
+):
+    """Run one RTRA-LLM supervisor update and print compact trigger information."""
+    if supervisor is None:
+        return None
+
+    distance_nmi = np.asarray(distance) * METERS_TO_NMI if distance_in_meters else np.asarray(distance)
+
+    result = supervisor.update(
+        risk=risk,
+        distance=distance_nmi,
+        bearing=bearing_rad,
+        dcpa=np.asarray(dcpa_m) * METERS_TO_NMI,
+        tcpa=tcpa_s,
+        step=step,
+        target_heading=target_heading_rad,
+        own_heading=own_heading_rad,
+    )
+
+    if result.triggered:
+        reasons = ",".join(result.trigger_reasons)
+        print(
+            f"[RTRA-LLM] t={time_value:6.1f}s step={step} "
+            f"TS{result.key_vessel_index + 1} q={result.key_risk:.3f} "
+            f"{result.encounter_type} -> {result.final_action.value} "
+            f"(Kdir={result.kdir}, trigger={reasons}, valid={result.valid})"
+        )
+        if should_show_debug() and result.response:
+            print(result.response)
+
+    return result
 
 def run_simulation(args=None, return_data=False):
     # Load environment variables from .env file if it exists
@@ -121,6 +289,15 @@ def run_simulation(args=None, return_data=False):
     # Parse command line arguments if not provided
     if args is None:
         args = parse_args()
+    else:
+        args = SimpleNamespace(**vars(args))
+    args = ensure_arg_defaults(args)
+    if args.seed is not None:
+        np.random.seed(int(args.seed))
+
+    if args.all_cases and not return_data:
+        from src.core.batch_experiments import run_batch_simulation
+        return run_batch_simulation(args)
     
     # Check if comparison mode is requested (only if not called from comparison)
     if args.compare and not return_data:
@@ -132,7 +309,8 @@ def run_simulation(args=None, return_data=False):
     dt = args.dt  # time step
     Ts = dt  # sampling time
     N = round(args.sim_time / dt)
-    Animation = not args.no_animation
+    progress_interval = max(1, int(5 / dt))
+    Animation = not args.no_animation and not return_data
 
     # Initial conditions
     x_v, y_v, psi_v = 0.0, 0.0, np.radians(0)  # initial position and heading
@@ -142,7 +320,7 @@ def run_simulation(args=None, return_data=False):
     X_0 = np.array([x_v, y_v, psi_v, r_v, b_v, u_v])
     X = X_0.copy()
 
-    Sat_amp_s = 20
+    Sat_amp_s = ACTUATOR_SATURATION
     i = 0
 
     # Waypoints
@@ -151,14 +329,14 @@ def run_simulation(args=None, return_data=False):
     i_wpt = 1
 
     # Vessel parameters
-    LOA_own, BOL_own = 30, 16
-    CPA_own = LOA_own * 2
+    LOA_own, BOL_own = OWN_SHIP_LENGTH_M, OWN_SHIP_BEAM_M
+    CPA_own = LOA_own * OWN_SHIP_CPA_MULTIPLIER
     
     # Get obstacle data
     Xob, Yob, Vob, psiob = get_obstacle_data(args.case_number)
-    LOA_ob = [80] * len(Xob)
-    BOL_ob = [30] * len(Xob)
-    CPA_ob = [LOA_ob[0] * 1] * len(Xob)
+    LOA_ob = [TARGET_SHIP_LENGTH_M] * len(Xob)
+    BOL_ob = [TARGET_SHIP_BEAM_M] * len(Xob)
+    CPA_ob = [LOA_ob[0] * TARGET_SHIP_CPA_MULTIPLIER] * len(Xob)
 
     # Initialize arrays
     time = []
@@ -178,6 +356,9 @@ def run_simulation(args=None, return_data=False):
     DCPA2, TCPA2, Vrel2, alpha2, psi_Vrel2 = (np.zeros((N, len(Xob))) for _ in range(5))
     Distance_ob, Bearing_ob, Risk = (np.zeros((N, len(Xob))) for _ in range(3))
 
+    llm_supervisor = initialize_llm_supervisor(args)
+    llm_current_kdir = 1
+
     # Prepare for animation if enabled
     if Animation:
         fig, ax = plt.subplots()
@@ -185,9 +366,33 @@ def run_simulation(args=None, return_data=False):
         plt.grid(True)
         writer = animation.PillowWriter(fps=5)
 
+        # Ensure output directory exists
+        os.makedirs(args.output_dir, exist_ok=True)
+
     # Main simulation loop
+    print(f"\n=== Starting Simulation ===")
+    print(f"Case: {args.case_number}")
+    print(f"Duration: {args.sim_time} seconds")
+    print(f"LLM enabled: {'No (Rule-trigger)' if args.rule_baseline else ('Yes' if args.llm == 1 else 'No')}")
+    print(f"LLM provider: {args.llm_provider}")
+    print(f"Low-level planner: {args.low_level_planner}")
+    print(f"Random seed: {args.seed}")
+    if args.llm == 1:
+        print(f"LLM trigger mode: {args.llm_trigger_mode}")
+        print(f"LLM risk threshold: {args.llm_risk_threshold}")
+        print(f"Maneuver memory: {'Off' if args.disable_memory else 'On'}")
+        print(f"Rule validator: {'Off' if args.disable_rule_validator else 'On'}")
+    print(f"Animation: {'Yes' if Animation else 'No'}")
+    print("-" * 50)
+
     if Animation:
-        with writer.saving(fig, f"{args.output_dir}/scenario_animation{args.case_number}.gif", dpi=200):
+        # Save in gif directory
+        output_path = f"scenario_animation{args.case_number}.gif"
+        gif_dir = Path("./img/gif")
+        gif_dir.mkdir(parents=True, exist_ok=True)
+        full_output_path = gif_dir / output_path
+
+        with writer.saving(fig, str(full_output_path), dpi=200):
             for i in range(len(x)):
                 # Record current state
                 time.append(t)
@@ -200,7 +405,7 @@ def run_simulation(args=None, return_data=False):
                 X_0 = X.copy()
 
                 # Speed command
-                u_p[i] = 43.3
+                u_p[i] = OWN_SHIP_SPEED_MPS
 
                 # Convert to nautical miles
                 METERS_TO_NMI = (1 / 1852)
@@ -216,15 +421,15 @@ def run_simulation(args=None, return_data=False):
                 # Path planning and collision avoidance
                 i_wpt = waypoint_selection(Xwpt, Ywpt, x_nmi[i], y_nmi[i], i_wpt)
                 psi_wp[i] = planning(Xwpt, Ywpt, x_nmi[i], y_nmi[i], i_wpt)
-                psi_oa[i], w_B, w_R, Distance_ob[i, :], Bearing_ob[i, :] = reactive_avoidance(
+                avoidance_fn = (velocity_obstacle_avoidance
+                                if args.low_level_planner == 'vo'
+                                else reactive_avoidance)
+                psi_oa[i], w_B, w_R, Distance_ob[i, :], Bearing_ob[i, :] = avoidance_fn(
+                    Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i],
+                    Vob, psiob, OWN_SHIP_SPEED_MPS) if args.low_level_planner == 'vo' else avoidance_fn(
                     Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i], t)
-                
-
-
-                # extract_kdir_from_response function moved to global scope
-                
-
-                # Run COLM decision making (function moved to global scope)
+                if llm_supervisor is not None:
+                    Kdir[i] = llm_current_kdir
 
                 # Overall yaw command with Kdir
                 psi_p[i] = psi_wp[i] + Kdir[i] * psi_oa[i]
@@ -268,32 +473,21 @@ def run_simulation(args=None, return_data=False):
                     Risk[i, j] = risk_calculations(
                         DCPA[i, j], TCPA[i, j], Distance_ob[i, j], Vrel[i, j])
 
-                if args.llm == 1:
-                    if not LLM_AVAILABLE:
-                        if i == 0:  # Print warning only once
-                            print("Warning: LLM requested but langchain_openai not available. Running without LLM.")
-                    else:
-                        if i % 200 == 0:
-                            decision = run_colm(
-                                Risk[i, :],
-                                Distance_ob[i, :],
-                                Bearing_ob[i, :],
-                                DCPA[i, :],
-                                TCPA[i, :],
-                                provider=args.llm_provider
-                            )
-                            print(f"\nStep {i}: COLM Decision:")
-                            print(decision)
-                            print(f"Risk: {Risk[i, :]}")
-                            
-                            new_kdir = extract_kdir_from_response(decision)
-                            Kdir[i] = new_kdir
-                            #print(f"Extracted Kdir value: {new_kdir}")
-                        elif i > 0:
-                            pass
-                            #Kdir[i] = Kdir[i-1]  # Maintain previous value between updates
-                        
-               
+                llm_result = update_llm_supervisor(
+                    llm_supervisor,
+                    Risk[i, :],
+                    Distance_ob[i, :],
+                    Bearing_ob[i, :],
+                    DCPA[i, :],
+                    TCPA[i, :],
+                    i,
+                    t,
+                    distance_in_meters=i >= 1,
+                    target_heading_rad=psiob,
+                    own_heading_rad=psi[i],
+                )
+                if llm_result is not None:
+                    llm_current_kdir = llm_result.kdir
 
                 # Animation
                 l = len(Risk[i, :])
@@ -312,8 +506,8 @@ def run_simulation(args=None, return_data=False):
 
             # Save animation plots
             plt.title(f'Case {args.case_number}', fontsize=25)
-            plt.savefig(f'{args.output_dir}/simulation_result{args.case_number}.eps', format='eps')
-            plt.savefig(f'{args.output_dir}/simulation_result{args.case_number}.png')
+            save_figure_with_type(plt.gcf(), 'simulation_result', 'eps', args.case_number)
+            save_figure_with_type(plt.gcf(), 'simulation_result', 'png', args.case_number, dpi=300)
             plt.show(block=True)
     else:
         # Run simulation without animation
@@ -332,7 +526,7 @@ def run_simulation(args=None, return_data=False):
             y_nmi[i] = y[i] / 1852
 
             # Speed command
-            u_p[i] = 43.3
+            u_p[i] = OWN_SHIP_SPEED_MPS
 
             # Convert to nautical miles
             METERS_TO_NMI = (1 / 1852)
@@ -348,8 +542,15 @@ def run_simulation(args=None, return_data=False):
             # Path planning and collision avoidance
             i_wpt = waypoint_selection(Xwpt, Ywpt, x_nmi[i], y_nmi[i], i_wpt)
             psi_wp[i] = planning(Xwpt, Ywpt, x_nmi[i], y_nmi[i], i_wpt)
-            psi_oa[i], w_B, w_R, Distance_ob[i, :], Bearing_ob[i, :] = reactive_avoidance(
+            avoidance_fn = (velocity_obstacle_avoidance
+                            if args.low_level_planner == 'vo'
+                            else reactive_avoidance)
+            psi_oa[i], w_B, w_R, Distance_ob[i, :], Bearing_ob[i, :] = avoidance_fn(
+                Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i],
+                Vob, psiob, OWN_SHIP_SPEED_MPS) if args.low_level_planner == 'vo' else avoidance_fn(
                 Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i], t)
+            if llm_supervisor is not None:
+                Kdir[i] = llm_current_kdir
 
             # Overall yaw command with Kdir
             psi_p[i] = psi_wp[i] + Kdir[i] * psi_oa[i]
@@ -396,67 +597,99 @@ def run_simulation(args=None, return_data=False):
                     Risk[i, j] = risk_calculations(
                         DCPA[i, j], TCPA[i, j], Distance_ob[i, j], Vrel[i, j])
 
-            if args.llm == 1:
-                if not LLM_AVAILABLE:
-                    if i == 0:  # Print warning only once
-                        print("Warning: LLM requested but langchain_openai not available. Running without LLM.")
-                else:
-                    if i % 200 == 0:
-                        decision = run_colm(
-                            Risk[i, :],
-                            Distance_ob[i, :],
-                            Bearing_ob[i, :],
-                            DCPA[i, :],
-                            TCPA[i, :],
-                            provider=args.llm_provider
-                        )
-                     
-                        print(decision)
-                        
-                        new_kdir = extract_kdir_from_response(decision)
-                        Kdir[i] = new_kdir
-                    elif i > 0:
-                        pass
+            # Print simulation progress every 5 seconds
+            if i % progress_interval == 0:
+                avg_risk = np.mean(Risk[i, :])
+                print(f"Time: {t:6.1f}s | Avg Risk: {avg_risk:.3f} | Kdir: {Kdir[i]:.1f}")
+
+            llm_result = update_llm_supervisor(
+                llm_supervisor,
+                Risk[i, :],
+                Distance_ob[i, :],
+                Bearing_ob[i, :],
+                DCPA[i, :],
+                TCPA[i, :],
+                i,
+                t,
+                distance_in_meters=i >= 1,
+                target_heading_rad=psiob,
+                own_heading_rad=psi[i],
+            )
+            if llm_result is not None:
+                llm_current_kdir = llm_result.kdir
 
             t += dt
 
-    #print(Kdir)
-    # Plot DCPA, TCPA, Risk plots
-    fig, axs = plt.subplots(2, 2)
-    for i in range(len(Xob)):
-        axs[0, 0].plot(time, DCPA[:, i] / 1852, linewidth=1.0)
-        axs[0, 1].plot(time, Distance_ob[:, i]/1852, linewidth=1.0)
-        axs[1, 0].plot(time, TCPA[:, i], linewidth=1.0, label=f'TS{i+1}')
-        axs[1, 1].plot(time, Risk[:, i], linewidth=1.0)
+    if not return_data:
+        fig, axs = plt.subplots(2, 2)
+        for i in range(len(Xob)):
+            axs[0, 0].plot(time, DCPA[:, i] / 1852, linewidth=1.0)
+            axs[0, 1].plot(time, Distance_ob[:, i]/1852, linewidth=1.0)
+            axs[1, 0].plot(time, TCPA[:, i], linewidth=1.0, label=f'TS{i+1}')
+            axs[1, 1].plot(time, Risk[:, i], linewidth=1.0)
 
-    # Configure plots
-    axs[0, 0].set_xlim([0, args.sim_time])
-    axs[0, 0].set_ylabel(r'$DCPA$ (nmi)', fontsize=20)
-    axs[0, 0].tick_params(axis='both', labelsize=15)
+        axs[0, 0].set_xlim([0, args.sim_time])
+        axs[0, 0].set_ylabel(r'$d_{\mathrm{CPA}}$ (nmi)', fontsize=20)
+        axs[0, 0].tick_params(axis='both', labelsize=15)
 
-    axs[0, 1].set_xlim([0, args.sim_time])
-    axs[0, 1].set_ylim([0, 2000/1852])
-    axs[0, 1].set_ylabel(r'$R$ (nmi)', fontsize=20)
-    axs[0, 1].tick_params(axis='both', labelsize=15)
-    
+        axs[0, 1].set_xlim([0, args.sim_time])
+        axs[0, 1].set_ylim([0, 2000/1852])
+        axs[0, 1].set_ylabel(r'$R$ (nmi)', fontsize=20)
+        axs[0, 1].tick_params(axis='both', labelsize=15)
 
-    axs[1, 0].set_xlim([0, args.sim_time])
-    axs[1, 0].set_xlabel('Time (s)', fontsize=20)
-    axs[1, 0].set_ylabel(r'$TCPA$ (s)', fontsize=20)
-    axs[1, 0].tick_params(axis='both', labelsize=15)
-    axs[1, 0].legend()
+        axs[1, 0].set_xlim([0, args.sim_time])
+        axs[1, 0].set_xlabel('Time (s)', fontsize=20)
+        axs[1, 0].set_ylabel(r'$t_{\mathrm{CPA}}$ (s)', fontsize=20)
+        axs[1, 0].tick_params(axis='both', labelsize=15)
+        axs[1, 0].legend()
 
-    axs[1, 1].set_xlim([0, args.sim_time])
-    axs[1, 1].set_ylim([0, 1])
-    axs[1, 1].set_xlabel('Time (s)', fontsize=20)
-    axs[1, 1].set_ylabel(r'$Risk$', fontsize=20)
-    axs[1, 1].tick_params(axis='both', labelsize=15)
+        axs[1, 1].set_xlim([0, args.sim_time])
+        axs[1, 1].set_ylim([0, 1])
+        axs[1, 1].set_xlabel('Time (s)', fontsize=20)
+        axs[1, 1].set_ylabel(r'$q$', fontsize=20)
+        axs[1, 1].tick_params(axis='both', labelsize=15)
 
-    fig.suptitle(f'Case {args.case_number}', fontsize=20)
-    plt.tight_layout()
-    plt.savefig(f'{args.output_dir}/plot_dcpa_tcpa_risk_{args.case_number}.eps', format='eps')
-    plt.savefig(f'{args.output_dir}/plot_dcpa_tcpa_risk_{args.case_number}.png')
-    plt.show()
+        fig.suptitle(f'Case {args.case_number}', fontsize=20)
+        plt.tight_layout()
+        save_figure_with_type(fig, 'plot_dcpa_tcpa_risk', 'eps', args.case_number)
+        save_figure_with_type(fig, 'plot_dcpa_tcpa_risk', 'png', args.case_number, dpi=300)
+        if args.no_animation:
+            plt.close(fig)
+        else:
+            plt.show()
+
+    if not return_data:
+        print("\n=== Simulation Summary ===")
+        print(f"Case: {args.case_number}")
+        print(f"Duration: {args.sim_time} seconds")
+        print(f"Total simulation steps: {len(time)}")
+
+        if len(Xob) > 0:
+            min_dcpa = np.min(DCPA) / 1852
+            max_risk = np.max(Risk)
+            print(f"Minimum DCPA: {min_dcpa:.2f} nautical miles")
+            print(f"Maximum Risk: {max_risk:.3f}")
+
+            starboard_turns = np.sum(Kdir == 1)
+            port_turns = np.sum(Kdir == -1)
+            stand_on = np.sum(Kdir == 0)
+            print(f"\nManeuver Statistics:")
+            print(f"  - Starboard turns: {starboard_turns}")
+            print(f"  - Port turns: {port_turns}")
+            print(f"  - Stand on: {stand_on}")
+
+        if llm_supervisor is not None:
+            print(f"\nLLM Supervisor Statistics:")
+            print(f"  - LLM calls: {llm_supervisor.call_count}")
+            print(f"  - Trigger events: {len(llm_supervisor.trigger_history)}")
+            print(f"  - Trigger mode: {args.llm_trigger_mode}")
+
+        print(f"\nOutput files generated:")
+        if Animation:
+            print(f"  - Animation: img/gif/scenario_animation{args.case_number}.gif")
+        print(f"  - Plots: img/png/plot_dcpa_tcpa_risk_{args.case_number}.png")
+        print(f"  - Plots: img/eps/plot_dcpa_tcpa_risk_{args.case_number}.eps")
+        print("=" * 50)
 
     # Return data if requested (for comparison mode)
     if return_data:
@@ -480,12 +713,30 @@ def run_simulation(args=None, return_data=False):
             'y': y,
             'psi': psi,
             'kdir': comparison_kdir,  # Use calculated comparison values
+            'control_kdir': Kdir.copy(),
             'risk': Risk,
             'dcpa': DCPA,
             'tcpa': TCPA,
             'distance_ob': Distance_ob,
             'obstacles_x': Xobs[-1, :] if len(Xobs) > 0 else [],
             'obstacles_y': Yobs[-1, :] if len(Yobs) > 0 else [],
+            'obstacles_x_history': Xobs,
+            'obstacles_y_history': Yobs,
+            'obstacles_heading_rad': np.asarray(psiob),
+            'target_speed_mps': np.asarray(Vob),
+            'waypoints_x': np.asarray(Xwpt),
+            'waypoints_y': np.asarray(Ywpt),
+            'case_number': args.case_number,
+            'dt': dt,
+            'llm_call_count': llm_supervisor.call_count if llm_supervisor is not None else 0,
+            'llm_trigger_history': llm_supervisor.trigger_history if llm_supervisor is not None else [],
+            'llm_trigger_mode': args.llm_trigger_mode,
+            'llm_risk_threshold': args.llm_risk_threshold,
+            'llm_memory_enabled': not args.disable_memory,
+            'llm_validator_enabled': not args.disable_rule_validator,
+            'rule_baseline': args.rule_baseline,
+            'low_level_planner': args.low_level_planner,
+            'random_seed': args.seed,
             'simulation_type': 'main_simulation'
         }
 
@@ -497,7 +748,7 @@ def run_simulation(args=None, return_data=False):
     plt.xlabel('Time (s)')
     plt.ylabel(r'$K_{dir}$')
     plt.grid(True)
-    plt.savefig(f'{args.output_dir}/plot_kdir_{args.case_number}.png', dpi=300)
+    save_figure_with_type(plt.gcf(), 'plot_kdir', 'png', args.case_number, dpi=300)
     plt.show()"""
 
 if __name__ == "__main__":

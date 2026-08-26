@@ -1,4 +1,13 @@
 import numpy as np
+from src.config.paper_parameters import (
+    DYNAMICS_BIAS_NOISE_STD,
+    DYNAMICS_BIAS_TIME_FACTOR,
+    DYNAMICS_K_PSI,
+    DYNAMICS_K_SPEED,
+    DYNAMICS_RATE_NOISE_STD,
+    DYNAMICS_T_PSI_S,
+    DYNAMICS_T_SPEED_S,
+)
 
 
 def vessel_dynamics(x_0, inputs):
@@ -15,20 +24,24 @@ def vessel_dynamics(x_0, inputs):
     x, y, psi, r, b, u = x_0
     tau_c, u_c = inputs
 
-    k_psi = 0.01
-    t_psi = 30.0
+    k_psi = DYNAMICS_K_PSI
+    t_psi = DYNAMICS_T_PSI_S
 
-    k_v = 1.0
-    t_v = 50.0
+    k_v = DYNAMICS_K_SPEED
+    t_v = DYNAMICS_T_SPEED_S
 
-    t_b = 20 * t_psi
+    t_b = DYNAMICS_BIAS_TIME_FACTOR * t_psi
 
     x_dot = u_c * np.cos(psi)
     y_dot = u_c * np.sin(psi)
     psi_dot = r
 
-    w_r = 0
-    w_b = 0.5 * np.random.randn()
+    w_r = (
+        DYNAMICS_RATE_NOISE_STD * np.random.randn()
+        if DYNAMICS_RATE_NOISE_STD
+        else 0.0
+    )
+    w_b = DYNAMICS_BIAS_NOISE_STD * np.random.randn()
 
     # Nomoto model
     r_dot = -(1/t_psi) * r + (1/t_psi) * k_psi * (tau_c - b) + w_r

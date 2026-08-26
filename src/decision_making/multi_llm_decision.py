@@ -1,23 +1,14 @@
 import os
+from src.config.paper_parameters import LLM_MAX_TOKENS, LLM_TEMPERATURE
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict, Union
-from enum import Enum
-import numpy as np
+from typing import List, Optional
 from abc import ABC, abstractmethod
 
-# Import LLM clients
 try:
     from langchain_openai import ChatOpenAI
-    from langchain_core.prompts.prompt import PromptTemplate
-    OPENAI_AVAILABLE = True
+    CHAT_OPENAI_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    CHAT_OPENAI_AVAILABLE = False
 
 @dataclass
 class VesselState:
@@ -27,195 +18,282 @@ class VesselState:
     bearing: float
     dcpa: float
     tcpa: float
-
-
-class RiskLevel(Enum):
-    """Risk level classification"""
-    LOW = "low"
-    MODERATE = "moderate"
-    HIGH = "high"
-    CRITICAL = "critical"
+    heading: Optional[float] = None
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers"""
-    
+
     @abstractmethod
     def generate_response(self, prompt: str) -> str:
         """Generate response from the LLM"""
         pass
-    
+
     @abstractmethod
     def is_available(self) -> bool:
         """Check if the LLM provider is available"""
         pass
 
-class OpenAIProvider(LLMProvider):
-    """OpenAI LLM provider implementation"""
-    
-    def __init__(self, model: str = "gpt-4", temperature: float = 0.1, max_tokens: int = 500):
+
+class ChatOpenAIProvider(LLMProvider):
+    """Base provider for OpenAI-compatible endpoints."""
+
+    def __init__(
+        self,
+        provider_name: str,
+        api_key: Optional[str],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        base_url: Optional[str] = None,
+    ):
+        self.provider_name = provider_name.lower()
+        self.api_key = api_key
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.base_url = base_url
         self.client = None
-        
-        if OPENAI_AVAILABLE and self.is_available():
-            self.client = ChatOpenAI(
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-    
+
+        if self.is_available():
+            client_kwargs = {
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "api_key": api_key,
+            }
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            self.client = ChatOpenAI(**client_kwargs)
+
     def is_available(self) -> bool:
-        """Check if OpenAI is available"""
-        return OPENAI_AVAILABLE and os.getenv("OPENAI_API_KEY") is not None
-    
+        """Check if ChatOpenAI and the provider API key are available."""
+        return CHAT_OPENAI_AVAILABLE and bool(self.api_key)
+
     def generate_response(self, prompt: str) -> str:
-        """Generate response using OpenAI"""
+        """Generate response through an OpenAI-compatible client."""
         if not self.client:
-            return "OpenAI not available"
-        
+            return f"{self.provider_name} not available"
+
         try:
             response = self.client.invoke(prompt)
             return response.content
         except Exception as e:
-            return f"OpenAI error: {str(e)}"
+            return f"{self.provider_name} error: {str(e)}"
 
-class ClaudeProvider(LLMProvider):
-    """Claude/Anthropic LLM provider implementation"""
-    
-    def __init__(self, model: str = "claude-sonnet-4-20250514", temperature: float = 0.1, max_tokens: int = 500):
-        self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.client = None
-        
-        if ANTHROPIC_AVAILABLE and self.is_available():
-            self.client = anthropic.Anthropic(
-                api_key=os.getenv("CLAUDE_API_KEY")
-            )
-    
+
+class OpenAIProvider(LLMProvider):
+    """OpenAI provider using OPENAI_* environment variables."""
+
+    def __init__(self):
+        self.provider = ChatOpenAIProvider(
+            provider_name="openai",
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model=os.getenv("OPENAI_MODEL", "gpt-4"),
+            temperature=float(os.getenv("OPENAI_TEMPERATURE", str(LLM_TEMPERATURE))),
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", str(LLM_MAX_TOKENS))),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+        )
+
     def is_available(self) -> bool:
-        """Check if Claude is available"""
-        return ANTHROPIC_AVAILABLE and os.getenv("CLAUDE_API_KEY") is not None
-    
+        return self.provider.is_available()
+
     def generate_response(self, prompt: str) -> str:
-        """Generate response using Claude"""
-        if not self.client:
-            return "Claude not available"
-        
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            return response.content[0].text
-        except Exception as e:
-            return f"Claude error: {str(e)}"
+        return self.provider.generate_response(prompt)
+
+
+class OtherProvider(LLMProvider):
+    """Generic provider for any OpenAI-compatible endpoint except OpenAI itself."""
+
+    def __init__(self, provider_name: str):
+        prefix = provider_name.upper()
+        self.provider_name = provider_name.lower()
+        self.provider = ChatOpenAIProvider(
+            provider_name=self.provider_name,
+            api_key=os.getenv(f"{prefix}_API_KEY"),
+            model=os.getenv(f"{prefix}_MODEL", ""),
+            temperature=float(os.getenv(f"{prefix}_TEMPERATURE", str(LLM_TEMPERATURE))),
+            max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", str(LLM_MAX_TOKENS))),
+            base_url=os.getenv(f"{prefix}_BASE_URL"),
+        )
+
+    def is_available(self) -> bool:
+        return self.provider.is_available() and bool(self.provider.model)
+
+    def generate_response(self, prompt: str) -> str:
+        if not self.provider.model:
+            return f"{self.provider_name} not configured: missing model"
+        return self.provider.generate_response(prompt)
 
 class MultiLLMCOLREGSInterpreter:
     """COLREGs interpreter that can use multiple LLM providers"""
-    
+
     def __init__(self, provider: str = None):
-        self.provider_name = provider or os.getenv("LLM_PROVIDER", "openai")
+        self.provider_name = (provider or os.getenv("LLM_PROVIDER", "openai")).lower()
         self.provider = self._initialize_provider()
-        
-        self.system_prompt = """You are a ship navigation officer. Make COLREGs-compliant decisions with your response in this format Rule {} (situation description), Action: [Stand on, no action / Give-way, turn to starboard / Give-way, turn to port / Continue current
-maneuver], Explanation: Turn starboard req .."""
+        self.system_prompt = self._load_system_prompt()
+
+    def _get_prompt_file_path(self) -> str:
+        """Return the absolute path to the unified prompt file."""
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        return os.path.join(project_root, "prompt", "prompt.txt")
+
+    def _load_system_prompt(self) -> str:
+        """Load system prompt from the unified offline prompt file."""
+        default_prompt = """You are a ship navigation officer. Based on the situation, give a simple decision in this format:
+Action: [Stand on / Give-way, turn to starboard / Give-way, turn to port]
+
+Situation:"""
+
+        try:
+            prompt_path = self._get_prompt_file_path()
+
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                prompt = f.read().strip()
+
+            if prompt:
+                return prompt
+
+            print(f"Warning: Prompt file is empty: {prompt_path}")
+            return default_prompt
+
+        except Exception as e:
+            print(f"Warning: Could not load system prompt from prompt/prompt.txt: {str(e)}")
+            return default_prompt
     
     def _initialize_provider(self) -> Optional[LLMProvider]:
-        """Initialize the appropriate LLM provider"""
-        if self.provider_name.lower() == "openai":
-            provider = OpenAIProvider(
-                model=os.getenv("OPENAI_MODEL", "gpt-4"),
-                temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
-                max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "50"))
-            )
-            if provider.is_available():
-                return provider
-        
-        elif self.provider_name.lower() == "claude":
-            provider = ClaudeProvider(
-                model=os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514"),
-                temperature=float(os.getenv("CLAUDE_TEMPERATURE", "0.1")),
-                max_tokens=int(os.getenv("CLAUDE_MAX_TOKENS", "50"))
-            )
-            if provider.is_available():
-                return provider
-        
-        # Fallback: try OpenAI if Claude fails, or vice versa
-        if self.provider_name.lower() == "claude":
-            fallback = OpenAIProvider()
-            if fallback.is_available():
-                print("Claude unavailable, falling back to OpenAI")
-                return fallback
-        else:
-            fallback = ClaudeProvider()
-            if fallback.is_available():
-                print("OpenAI unavailable, falling back to Claude")
-                return fallback
-        
-        return None
+        """Initialize the requested provider without extra fallback chains."""
+        provider = OpenAIProvider() if self.provider_name == "openai" else OtherProvider(self.provider_name)
+        return provider if provider.is_available() else None
     
-    
-    
-    def _format_situation_description(self, vessels: List[VesselState]) -> str:
+    def _format_bearing_degrees(self, bearing: float) -> float:
+        """Normalize relative bearing to degrees for prompt display."""
+        if abs(bearing) <= 2 * 3.141592653589793:
+            bearing = bearing * 180.0 / 3.141592653589793
+        return ((bearing + 180.0) % 360.0) - 180.0
+
+    def _format_situation_description(
+        self,
+        vessels: List[VesselState],
+        memory_context: Optional[str] = None,
+        encounter_type: Optional[str] = None,
+        key_vessel_index: Optional[int] = None,
+    ) -> str:
         """Format situation description for LLM"""
         if not vessels:
             return "No vessels detected."
-        
-        
-        highest_risk_vessel = max(vessels, key=lambda v: v.risk)
-        
-        description = f"""
-            Maritime Situation Analysis:
-            - Number of vessels: {len(vessels)}
-            - Highest risk vessel:
-            * Risk Level: {highest_risk_vessel.risk:.2f}
-            * Distance: {highest_risk_vessel.distance:.2f} nautical miles
-            * Bearing: {highest_risk_vessel.bearing:.1f}°
-            * DCPA: {highest_risk_vessel.dcpa:.2f} nautical miles
-            * TCPA: {highest_risk_vessel.tcpa:.1f} seconds
 
-            Based on COLREGs rules, what action should be taken?"""
-        
+        if key_vessel_index is None:
+            key_vessel_index = max(range(len(vessels)), key=lambda idx: vessels[idx].risk)
+        highest_risk_vessel = vessels[key_vessel_index]
+
+        # Add more context about the situation
+        if highest_risk_vessel.tcpa < 0:
+            time_status = "vessel is astern (already passed)"
+        elif highest_risk_vessel.tcpa > 300:
+            time_status = "vessel is far, no immediate action needed"
+        else:
+            time_status = f"vessel will reach CPA in {highest_risk_vessel.tcpa:.1f} seconds"
+
+        vessel_lines = []
+        for idx, vessel in enumerate(vessels, start=1):
+            marker = " (key target)" if idx - 1 == key_vessel_index else ""
+            bearing_deg = self._format_bearing_degrees(vessel.bearing)
+            vessel_lines.append(
+                f"- Target vessel {idx}{marker}: q={vessel.risk:.3f}, "
+                f"R={vessel.distance:.2f} nmi, relative bearing={bearing_deg:.1f} deg, "
+                f"d_CPA={vessel.dcpa:.2f} nmi, t_CPA={vessel.tcpa:.1f} s"
+            )
+
+        memory_block = f"\n{memory_context.strip()}\n" if memory_context else ""
+        prompt_ablation_variant = os.getenv("CORALL_PROMPT_ABLATION_VARIANT")
+        include_encounter_hint = prompt_ablation_variant is None
+        encounter_block = (
+            f"- Encounter type: {encounter_type}\n"
+            if encounter_type and include_encounter_hint
+            else ""
+        )
+
+        description = f"""
+Maritime Situation Analysis:
+- Number of vessels: {len(vessels)}
+- Key target vessel: {key_vessel_index + 1}
+{encounter_block}- Key target timing: {time_status}
+
+Current vessel states:
+{os.linesep.join(vessel_lines)}
+{memory_block}
+
+What action should the own ship take next?"""
+
         return description.strip()
     
-    def make_decision(self, vessels: List[VesselState], time_idx: int = 0) -> str:
+    def make_decision(
+        self,
+        vessels: List[VesselState],
+        time_idx: int = 0,
+        memory_context: Optional[str] = None,
+        encounter_type: Optional[str] = None,
+        key_vessel_index: Optional[int] = None,
+    ) -> str:
         """Make a COLREGs-compliant decision"""
         if not self.provider:
             return "No LLM provider available"
-        
+
         if not vessels:
             return "No vessels detected - maintain course and speed"
-        
+
         # Format the situation
-        situation_description = self._format_situation_description(vessels)
-        
+        situation_description = self._format_situation_description(
+            vessels,
+            memory_context=memory_context,
+            encounter_type=encounter_type,
+            key_vessel_index=key_vessel_index,
+        )
+
         # Create full prompt
-        full_prompt = f"{self.system_prompt}\n\n{situation_description}"
-        
+        full_prompt = f"{self.system_prompt}\n\nDecision step: {time_idx}\n\n{situation_description}"
+
+        if os.getenv("SHOW_LLM_DEBUG", "false").lower() == "true":
+            print(f"\n[DEBUG] Full prompt sent to {self.provider_name.upper()}:")
+            print("=" * 60)
+            print(full_prompt)
+            print("=" * 60)
+
         # Get response from LLM
         response = self.provider.generate_response(full_prompt)
-        
+
+        if os.getenv("SHOW_LLM_DEBUG", "false").lower() == "true":
+            print(f"\n[DEBUG] Raw response received from {self.provider_name.upper()}:")
+            print("=" * 60)
+            print(repr(response))
+            print("-" * 60)
+            print(response)
+            print("=" * 60)
+
+        # Ensure response is properly formatted
+        if not response or len(response.strip()) == 0:
+            response = "Error: Empty response from LLM"
+
         # Add provider information
         provider_info = f"[{self.provider_name.upper()}] "
-        
+
         return f"{provider_info}{response}"
     
     def get_available_providers(self) -> List[str]:
         """Get list of available LLM providers"""
         providers = []
-        
+
         if OpenAIProvider().is_available():
             providers.append("openai")
-        
-        if ClaudeProvider().is_available():
-            providers.append("claude")
-        
+
+        for env_name in sorted(os.environ):
+            if not env_name.endswith("_API_KEY") or env_name == "OPENAI_API_KEY":
+                continue
+            provider_name = env_name[:-8].lower()
+            provider = OtherProvider(provider_name)
+            if provider.is_available():
+                providers.append(provider_name)
+
         return providers
 
 # Backward compatibility with original interface
