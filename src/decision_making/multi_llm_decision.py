@@ -1,4 +1,5 @@
 import os
+from src.config.paper_parameters import LLM_MAX_TOKENS, LLM_TEMPERATURE
 from dataclasses import dataclass
 from typing import List, Optional
 from abc import ABC, abstractmethod
@@ -17,6 +18,7 @@ class VesselState:
     bearing: float
     dcpa: float
     tcpa: float
+    heading: Optional[float] = None
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers"""
@@ -87,8 +89,8 @@ class OpenAIProvider(LLMProvider):
             provider_name="openai",
             api_key=os.getenv("OPENAI_API_KEY"),
             model=os.getenv("OPENAI_MODEL", "gpt-4"),
-            temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "1000")),
+            temperature=float(os.getenv("OPENAI_TEMPERATURE", str(LLM_TEMPERATURE))),
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", str(LLM_MAX_TOKENS))),
             base_url=os.getenv("OPENAI_BASE_URL"),
         )
 
@@ -109,8 +111,8 @@ class OtherProvider(LLMProvider):
             provider_name=self.provider_name,
             api_key=os.getenv(f"{prefix}_API_KEY"),
             model=os.getenv(f"{prefix}_MODEL", ""),
-            temperature=float(os.getenv(f"{prefix}_TEMPERATURE", "0.1")),
-            max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", "1000")),
+            temperature=float(os.getenv(f"{prefix}_TEMPERATURE", str(LLM_TEMPERATURE))),
+            max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", str(LLM_MAX_TOKENS))),
             base_url=os.getenv(f"{prefix}_BASE_URL"),
         )
 
@@ -163,14 +165,26 @@ Situation:"""
         provider = OpenAIProvider() if self.provider_name == "openai" else OtherProvider(self.provider_name)
         return provider if provider.is_available() else None
     
-    
-    
-    def _format_situation_description(self, vessels: List[VesselState]) -> str:
+    def _format_bearing_degrees(self, bearing: float) -> float:
+        """Normalize relative bearing to degrees for prompt display."""
+        if abs(bearing) <= 2 * 3.141592653589793:
+            bearing = bearing * 180.0 / 3.141592653589793
+        return ((bearing + 180.0) % 360.0) - 180.0
+
+    def _format_situation_description(
+        self,
+        vessels: List[VesselState],
+        memory_context: Optional[str] = None,
+        encounter_type: Optional[str] = None,
+        key_vessel_index: Optional[int] = None,
+    ) -> str:
         """Format situation description for LLM"""
         if not vessels:
             return "No vessels detected."
 
-        highest_risk_vessel = max(vessels, key=lambda v: v.risk)
+        if key_vessel_index is None:
+            key_vessel_index = max(range(len(vessels)), key=lambda idx: vessels[idx].risk)
+        highest_risk_vessel = vessels[key_vessel_index]
 
         # Add more context about the situation
         if highest_risk_vessel.tcpa < 0:
@@ -180,21 +194,47 @@ Situation:"""
         else:
             time_status = f"vessel will reach CPA in {highest_risk_vessel.tcpa:.1f} seconds"
 
+        vessel_lines = []
+        for idx, vessel in enumerate(vessels, start=1):
+            marker = " (key target)" if idx - 1 == key_vessel_index else ""
+            bearing_deg = self._format_bearing_degrees(vessel.bearing)
+            vessel_lines.append(
+                f"- Target vessel {idx}{marker}: q={vessel.risk:.3f}, "
+                f"R={vessel.distance:.2f} nmi, relative bearing={bearing_deg:.1f} deg, "
+                f"d_CPA={vessel.dcpa:.2f} nmi, t_CPA={vessel.tcpa:.1f} s"
+            )
+
+        memory_block = f"\n{memory_context.strip()}\n" if memory_context else ""
+        prompt_ablation_variant = os.getenv("CORALL_PROMPT_ABLATION_VARIANT")
+        include_encounter_hint = prompt_ablation_variant is None
+        encounter_block = (
+            f"- Encounter type: {encounter_type}\n"
+            if encounter_type and include_encounter_hint
+            else ""
+        )
+
         description = f"""
 Maritime Situation Analysis:
 - Number of vessels: {len(vessels)}
-- Highest risk vessel details:
-* Risk Level: {highest_risk_vessel.risk:.3f}
-* Distance: {highest_risk_vessel.distance:.2f} nautical miles
-* Relative Bearing: {highest_risk_vessel.bearing:.1f}°
-* DCPA (Closest Point of Approach): {highest_risk_vessel.dcpa:.2f} nautical miles
-* TCPA (Time to CPA): {highest_risk_vessel.tcpa:.1f} seconds ({time_status})
+- Key target vessel: {key_vessel_index + 1}
+{encounter_block}- Key target timing: {time_status}
 
-Based on COLREGs rules, what action should be taken?"""
+Current vessel states:
+{os.linesep.join(vessel_lines)}
+{memory_block}
+
+What action should the own ship take next?"""
 
         return description.strip()
     
-    def make_decision(self, vessels: List[VesselState], time_idx: int = 0) -> str:
+    def make_decision(
+        self,
+        vessels: List[VesselState],
+        time_idx: int = 0,
+        memory_context: Optional[str] = None,
+        encounter_type: Optional[str] = None,
+        key_vessel_index: Optional[int] = None,
+    ) -> str:
         """Make a COLREGs-compliant decision"""
         if not self.provider:
             return "No LLM provider available"
@@ -203,27 +243,32 @@ Based on COLREGs rules, what action should be taken?"""
             return "No vessels detected - maintain course and speed"
 
         # Format the situation
-        situation_description = self._format_situation_description(vessels)
+        situation_description = self._format_situation_description(
+            vessels,
+            memory_context=memory_context,
+            encounter_type=encounter_type,
+            key_vessel_index=key_vessel_index,
+        )
 
         # Create full prompt
-        full_prompt = f"{self.system_prompt}\n\n{situation_description}"
+        full_prompt = f"{self.system_prompt}\n\nDecision step: {time_idx}\n\n{situation_description}"
 
-        # Debug: Print the prompt being sent to LLM
-        print(f"\n[DEBUG] Full prompt sent to {self.provider_name.upper()}:")
-        print("=" * 60)
-        print(full_prompt)
-        print("=" * 60)
+        if os.getenv("SHOW_LLM_DEBUG", "false").lower() == "true":
+            print(f"\n[DEBUG] Full prompt sent to {self.provider_name.upper()}:")
+            print("=" * 60)
+            print(full_prompt)
+            print("=" * 60)
 
         # Get response from LLM
         response = self.provider.generate_response(full_prompt)
 
-        # Debug: Print the raw response
-        print(f"\n[DEBUG] Raw response received from {self.provider_name.upper()}:")
-        print("=" * 60)
-        print(repr(response))  # repr shows special characters
-        print("-" * 60)
-        print(response)  # Normal display
-        print("=" * 60)
+        if os.getenv("SHOW_LLM_DEBUG", "false").lower() == "true":
+            print(f"\n[DEBUG] Raw response received from {self.provider_name.upper()}:")
+            print("=" * 60)
+            print(repr(response))
+            print("-" * 60)
+            print(response)
+            print("=" * 60)
 
         # Ensure response is properly formatted
         if not response or len(response.strip()) == 0:

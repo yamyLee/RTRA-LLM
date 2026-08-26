@@ -1,4 +1,5 @@
 import numpy as np
+from src.config.paper_parameters import TARGET_SHIP_SPEED_MPS
 
 def nautical_to_meters(nm_value):
     return nm_value * 1852
@@ -30,17 +31,26 @@ obstacle_cases = {
     
 }
 
+VALID_CASE_NUMBERS = tuple(
+    sorted(int(case_name.split()[1]) for case_name in obstacle_cases)
+)
+
 # Function to get obstacles for a specific case
 def get_obstacles(case_number):
     case_key = f"Case {case_number}"
     return obstacle_cases.get(case_key, [])
 
 
+def get_case_numbers():
+    """Return all supported Imazu case numbers."""
+    return VALID_CASE_NUMBERS
+
+
 def get_obstacle_data(case_number):
     """
     Convert obstacle case data to simulation format
     Args:
-        case_number (int): The case number to use (1-22)
+        case_number (int): The case number to use (1-23)
     Returns:
         Xob, Yob (lists): X and Y positions in meters
         Vob (list): Velocities in m/s 
@@ -48,6 +58,9 @@ def get_obstacle_data(case_number):
     """
     # Get obstacle data for the case
     obstacles = get_obstacles(case_number)
+    if not obstacles:
+        supported = f"{VALID_CASE_NUMBERS[0]}-{VALID_CASE_NUMBERS[-1]}"
+        raise ValueError(f"Unsupported case_number {case_number}. Supported Imazu cases: {supported}.")
     
     # Initialize empty lists
     Xob = []
@@ -55,7 +68,7 @@ def get_obstacle_data(case_number):
     psiob = []
     
     # Default velocity (you may want to adjust this)
-    Vob = [18.52] * len(obstacles)  # Assuming 9.5 m/s for all obstacles
+    Vob = [TARGET_SHIP_SPEED_MPS] * len(obstacles)
     
     # Extract positions and angles from obstacles
     for obstacle in obstacles:
@@ -67,4 +80,3 @@ def get_obstacle_data(case_number):
         psiob.append(np.radians(angle))  # Convert angle to radians
     
     return Xob, Yob, Vob, np.array(psiob)
-

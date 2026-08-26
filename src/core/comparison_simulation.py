@@ -4,6 +4,8 @@ from typing import Dict, Any
 
 from src.core.simulation import run_simulation as _run_simulation
 from src.visualization.comparison_plots import plot_kdir_comparison, create_comparison_summary
+from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER
+from src.core.experiment_metrics import count_turn_events
 
 def run_comparison_simulation(args) -> Dict[str, Any]:
     """
@@ -22,15 +24,18 @@ def run_comparison_simulation(args) -> Dict[str, Any]:
     # Store original args
     original_llm = args.llm
     original_animation = args.no_animation
+    original_planner = getattr(args, 'low_level_planner', PAPER_LOW_LEVEL_PLANNER)
     os.makedirs(args.output_dir, exist_ok=True)
     
     print("Step 1: Running Baseline Simulation (No LLM)...")
     args.llm = 0  # Disable LLM for baseline
     args.no_animation = True
+    args.low_level_planner = PAPER_LOW_LEVEL_PLANNER
     baseline_results = _run_simulation(args, return_data=True)
     
     print("\n Step 2: Running LLM Simulation...")
     args.llm = 1  # Enable LLM
+    args.low_level_planner = PAPER_LOW_LEVEL_PLANNER
     llm_results = _run_simulation(args, return_data=True)
     
     print("\n Step 3: Creating Comparison Plots...")
@@ -62,6 +67,7 @@ def run_comparison_simulation(args) -> Dict[str, Any]:
     # Restore original args
     args.llm = original_llm
     args.no_animation = original_animation
+    args.low_level_planner = original_planner
     
     return {
         'baseline': baseline_results,
@@ -77,9 +83,9 @@ def run_comparison_simulation(args) -> Dict[str, Any]:
 def calculate_comparison_stats(baseline_results: Dict, llm_results: Dict, args) -> Dict[str, Dict]:
     """Calculate statistics for comparison between baseline and LLM simulations."""
 
-    def safe_mean(values: np.ndarray) -> float:
-        valid_values = values[values > 0]
-        return float(np.mean(valid_values)) if valid_values.size > 0 else 0.0
+    def finite_mean(values: np.ndarray) -> float:
+        finite_values = values[np.isfinite(values)]
+        return float(np.mean(finite_values)) if finite_values.size > 0 else 0.0
     
     # Extract data
     kdir_baseline = baseline_results['kdir']
@@ -89,19 +95,31 @@ def calculate_comparison_stats(baseline_results: Dict, llm_results: Dict, args) 
     
     # Calculate statistics
     baseline_stats = {
-        'total_turns': np.sum(np.abs(kdir_baseline) > 0.1),
+        'total_turns': count_turn_events(kdir_baseline),
         'max_risk': np.max(risk_baseline),
-        'avg_risk': safe_mean(risk_baseline),
+        'avg_risk': finite_mean(risk_baseline),
+        'avg_positive_risk': finite_mean(risk_baseline[risk_baseline > 0]),
         'final_distance': np.sqrt(baseline_results['x'][-1]**2 + baseline_results['y'][-1]**2) / 1852,
-        'sim_time': args.sim_time
+        'sim_time': args.sim_time,
+        'llm_calls': baseline_results.get('llm_call_count', 0),
+        'trigger_events': len(baseline_results.get('llm_trigger_history', [])),
+        'low_level_planner': baseline_results.get('low_level_planner', PAPER_LOW_LEVEL_PLANNER),
+        'random_seed': baseline_results.get('random_seed', getattr(args, 'seed', None)),
     }
     
     llm_stats = {
-        'total_turns': np.sum(np.abs(kdir_llm) > 0.1),
+        'total_turns': count_turn_events(kdir_llm),
         'max_risk': np.max(risk_llm),
-        'avg_risk': safe_mean(risk_llm),
+        'avg_risk': finite_mean(risk_llm),
+        'avg_positive_risk': finite_mean(risk_llm[risk_llm > 0]),
         'final_distance': np.sqrt(llm_results['x'][-1]**2 + llm_results['y'][-1]**2) / 1852,
-        'sim_time': args.sim_time
+        'sim_time': args.sim_time,
+        'llm_calls': llm_results.get('llm_call_count', 0),
+        'trigger_events': len(llm_results.get('llm_trigger_history', [])),
+        'trigger_mode': llm_results.get('llm_trigger_mode', getattr(args, 'llm_trigger_mode', 'risk')),
+        'risk_threshold': llm_results.get('llm_risk_threshold', getattr(args, 'llm_risk_threshold', LLM_RISK_THRESHOLD)),
+        'low_level_planner': llm_results.get('low_level_planner', PAPER_LOW_LEVEL_PLANNER),
+        'random_seed': llm_results.get('random_seed', getattr(args, 'seed', None)),
     }
     
     # Calculate agreement

@@ -121,6 +121,8 @@ def create_comparison_summary(baseline_stats: Dict[str, Any],
 - **LLM Provider**: {llm_provider}
 - **Case Number**: {case_number}
 - **Simulation Time**: {baseline_stats.get('sim_time', 'N/A')} seconds
+- **LLM Trigger Mode**: {llm_stats.get('trigger_mode', 'N/A')}
+- **Risk Threshold**: {llm_stats.get('risk_threshold', 'N/A')}
 
 ## Navigation Behavior Comparison
 
@@ -128,6 +130,10 @@ def create_comparison_summary(baseline_stats: Dict[str, Any],
 - **Baseline Total Turns**: {baseline_stats.get('total_turns', 'N/A')}
 - **{llm_provider} Total Turns**: {llm_stats.get('total_turns', 'N/A')}
 - **Turn Agreement Rate**: {baseline_stats.get('turn_agreement', 'N/A')}
+
+### LLM Invocation
+- **LLM Calls**: {llm_stats.get('llm_calls', 'N/A')}
+- **Trigger Events**: {llm_stats.get('trigger_events', 'N/A')}
 
 ### Risk Management
 - **Baseline Max Risk**: {baseline_stats.get('max_risk', 'N/A'):.3f}

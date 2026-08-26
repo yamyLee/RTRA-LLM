@@ -33,6 +33,6 @@ def cpa_calculations_0speed(x, y, x_obs, y_obs, v_x, v_y, vx_ob, vy_ob, distance
     alpha = psi_LOS - psi_Vrel
 
     DCPA = distance_ob * np.sin(alpha)
-    TCPA = distance_ob * np.cos(alpha) / relative_speed
+    TCPA = np.inf if relative_speed == 0 else distance_ob * np.cos(alpha) / relative_speed
 
     return DCPA, TCPA, relative_speed, alpha, psi_Vrel

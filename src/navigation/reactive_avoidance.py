@@ -1,5 +1,10 @@
 import numpy as np
-from scipy.special import expit  # For the sigmoid function
+from src.config.paper_parameters import (
+    AVOIDANCE_BEARING_SIGMA_DEG,
+    AVOIDANCE_DISTANCE_INNER_M,
+    AVOIDANCE_DISTANCE_OUTER_M,
+    AVOIDANCE_HEADING_GAIN,
+)
 
 
 def zmf(x, a, b):
@@ -33,12 +38,12 @@ def reactive_avoidance(x_ob, y_ob, x, y, psi, t):
         distance_ob (numpy.array): Distances to obstacles
         bearing_ob (numpy.array): Bearings to obstacles
     """
-    a = 600.0/1852
-    b = 1200/1852
+    a = AVOIDANCE_DISTANCE_INNER_M / 1852.0
+    b = AVOIDANCE_DISTANCE_OUTER_M / 1852.0
 
     x_distro = np.arange(-90, 90.1, 0.1)
     c = 0
-    sig = 80 * np.pi / 180
+    sig = np.deg2rad(AVOIDANCE_BEARING_SIGMA_DEG)
 
     distance_ob = np.sqrt((np.array(x_ob) - x)**2 + (np.array(y_ob) - y)**2)
     #print(distance_ob)
@@ -49,6 +54,6 @@ def reactive_avoidance(x_ob, y_ob, x, y, psi, t):
     w_r = zmf(distance_ob, a, b)
     w_b = -np.exp(-(bearing_ob**2) / (2 * sig**2))
 
-    psi_oa = np.sum(w_r * w_b) * 2
+    psi_oa = np.sum(w_r * w_b) * AVOIDANCE_HEADING_GAIN
 
     return psi_oa, w_b, w_r, distance_ob, bearing_ob

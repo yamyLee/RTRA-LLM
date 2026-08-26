@@ -1,3 +1,10 @@
+from src.config.paper_parameters import (
+    CONTROL_KD_YAW,
+    CONTROL_KI_YAW,
+    CONTROL_KP_YAW,
+)
+
+
 def controller(psi_p, psi, r, v_p, b, ui_psi1, Ts):
     """
     Controller function for yaw and speed control.
@@ -19,9 +26,9 @@ def controller(psi_p, psi, r, v_p, b, ui_psi1, Ts):
     """
 
     # Yaw Controller
-    kp_yaw = 100.0
-    kd_yaw = -500.0
-    ki_yaw = 0.0
+    kp_yaw = CONTROL_KP_YAW
+    kd_yaw = CONTROL_KD_YAW
+    ki_yaw = CONTROL_KI_YAW
 
     # For unstable mode (commented out in the original)
     # kp_yaw = -100.0

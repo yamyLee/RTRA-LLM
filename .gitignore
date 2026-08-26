@@ -74,3 +74,12 @@ Thumbs.db
 *.pem
 .env.*
 config/secrets.py
+config/api_keys.json
+
+# Generated simulation outputs and local working artifacts
+img/
+output/
+Simulation Results/
+tmp/
+skills/
+officecli
