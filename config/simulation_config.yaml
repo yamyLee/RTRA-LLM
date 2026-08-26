@@ -2,6 +2,7 @@
 simulation:
   default_time: 450.0          
   default_dt: 0.1              
+  random_seed: 42
   default_case: 1              
   output_directory: "img/"     
   animation_fps: 5             
@@ -9,43 +10,72 @@ simulation:
 # Vessel Configuration
 vessel:
   own_ship:
-    length_overall: 30         
-    beam_overall: 16           
-    cpa_multiplier: 2          
-    default_speed: 43.3       
+    length_overall: 30.0       # m
+    beam_overall: 16.0         # m
+    cpa_multiplier: 2.0
+    default_speed: 43.3        # m/s
     
   target_ships:
-    length_overall: 80         
-    beam_overall: 30           
-    cpa_multiplier: 1          
+    length_overall: 80.0       # m
+    beam_overall: 30.0         # m
+    default_speed: 18.52       # m/s
+    cpa_multiplier: 1.0
 
 # Navigation Parameters
 navigation:
-  waypoint_threshold: 200      
+  waypoint_threshold: 200.0    # m
+  guidance_rho: 2200.0         # m
   default_waypoints:
     start: [0, 0]              
     end: [40, 0]               
 
 # Control System Parameters
 control:
-  sampling_time: 0.1           
-  saturation_amplitude: 20     
+  sampling_time: 0.1           # s
+  saturation_amplitude: 20.0   # actuator input units
   controller_gains:
-    kp: 1.0                    
-    ki: 0.1                    
-    kd: 0.01                   
+    kp_yaw: 100.0
+    ki_yaw: 0.0
+    kd_yaw: -500.0
+
+dynamics:
+  model: "first_order_nomoto_like"
+  k_psi: 0.01
+  t_psi: 30.0                  # s
+  k_speed: 1.0
+  t_speed: 50.0                 # s
+  bias_time_factor: 20.0
+  rate_noise_std: 0.0
+  bias_noise_std: 0.5
 
 # Risk Assessment Parameters
 risk_assessment:
   dcpa_thresholds:
-    safe: 0.5                  
-    caution: 0.2               
-    danger: 0.1                
+    lower: 443.0                # m
+    upper: 926.0                # m
   
   tcpa_thresholds:
-    immediate: 60              
-    near_term: 300             
-    long_term: 600             
+    lower: 180.0                # s
+    upper: 360.0                # s
+
+  distance_thresholds:
+    lower: 148.16               # m
+    upper: 463.0                 # m
+
+  aggregation: "mean_of_three_zmf"
+
+local_avoidance:
+  distance_inner: 600.0         # m
+  distance_outer: 1200.0        # m
+  bearing_sigma: 80.0           # deg
+  heading_gain: 2.0
+
+velocity_obstacle:
+  enabled_for_baseline: true
+  time_horizon: 360.0           # s
+  safety_radius: 600.0          # m
+  heading_search: 90.0          # deg around current heading
+  heading_step: 1.0             # deg
 
 # Visualization Parameters
 visualization:
@@ -67,11 +97,18 @@ visualization:
 
 # LLM Configuration (Optional)
 llm:
-  enabled: false               
-  model: "gpt-4"      
-  temperature: 0.1            
-  max_tokens: 500              
-  update_interval: 200         
+  enabled: false
+  provider: "zhipu"
+  model: "glm-4.5"
+  base_url: ""
+  temperature: 0.1
+  max_tokens: 500
+  trigger_mode: "risk"        # risk, fixed, always
+  risk_threshold: 0.30
+  fixed_interval: 250
+  enable_memory: true
+  enable_rule_validator: true
+  prompt_path: "prompt/prompt.txt"
   
 # Output Configuration
 output:
@@ -84,5 +121,4 @@ output:
 debug:
   enabled: false              # Enable debug output
   log_level: "INFO"           # Logging level
-  save_intermediate: false    # Save intermediate calculations
   verbose_output: false       # Verbose console output

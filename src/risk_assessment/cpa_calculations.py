@@ -38,6 +38,6 @@ def cpa_calculations(x, y, x_1, y_1, x_obs, y_obs, x_obs_1, y_obs_1, ts):
     dist = np.sqrt((x - x_obs)**2 + (y - y_obs)**2)
 
     DCPA = dist * np.sin(alpha)
-    TCPA = (dist * np.cos(alpha)) / v_rel
+    TCPA = np.inf if v_rel == 0 else (dist * np.cos(alpha)) / v_rel
 
     return DCPA, TCPA, v_rel, alpha, psi_v_rel

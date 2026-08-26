@@ -9,14 +9,13 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="marine-vessel-simulation",
+    name="corall",
     version="1.0.0",
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="A comprehensive simulation framework for marine vessel navigation and collision avoidance",
+    author="RTRA-LLM Contributors",
+    description="Risk-triggered rule-aware LLM supervision for COLREGs-compliant ship collision avoidance",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/marine-vessel-simulation",
+    url="https://github.com/Klins101/CORALL",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -25,13 +24,12 @@ setup(
         "Topic :: Scientific/Engineering :: Visualization",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=requirements,
     extras_require={
         "dev": [

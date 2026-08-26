@@ -1,4 +1,8 @@
 import numpy as np
+from src.config.paper_parameters import (
+    GUIDANCE_RHO_M,
+    WAYPOINT_SWITCH_DISTANCE_M,
+)
 
 def waypoint_selection(Xwpt, Ywpt, x, y, i_wpt):
     """
@@ -15,7 +19,7 @@ def waypoint_selection(Xwpt, Ywpt, x, y, i_wpt):
     int: Updated waypoint index
     """
    
-    Circ = 200/1852  # Threshold distance for selecting the next waypoint
+    Circ = WAYPOINT_SWITCH_DISTANCE_M / 1852.0
 
     for j in range(i_wpt, len(Xwpt)):
         if np.sqrt((Xwpt[j] - x)**2 + (Ywpt[j] - y)**2) < Circ:
@@ -54,7 +58,7 @@ def planning(Xwpt, Ywpt, x, y, i_wpt):
     err = S * np.tan(delta_p)
     #print(err)
     
-    rho = 2200/1852
+    rho = GUIDANCE_RHO_M / 1852.0
 
     psi_p = np.arctan2(Yewpt, Xewpt) - np.arctan(err / rho) 
 
