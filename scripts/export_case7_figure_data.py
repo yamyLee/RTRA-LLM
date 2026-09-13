@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rule_baseline", action="store_true")
     parser.add_argument("--low_level_planner", choices=["reactive", "vo"], default=PAPER_LOW_LEVEL_PLANNER)
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
-    parser.add_argument("--llm_trigger_mode", choices=["risk", "fixed", "always"], default="risk")
+    parser.add_argument("--llm_trigger_mode", choices=["risk", "fixed", "always", "high_level_always"], default="risk")
     parser.add_argument("--llm_risk_threshold", type=float, default=LLM_RISK_THRESHOLD)
     parser.add_argument("--disable_memory", action="store_true")
     parser.add_argument("--disable_rule_validator", action="store_true")

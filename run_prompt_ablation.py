@@ -49,8 +49,9 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
+from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 _ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_ROOT))
@@ -144,18 +145,18 @@ def _use_prompt(variant: Dict[str, Any]):
     if ACTIVE_PROMPT.exists():
         backup_file = PROMPT_DIR / f"_backup_prompt_{os.getpid()}.txt"
         shutil.copy2(ACTIVE_PROMPT, backup_file)
-    previous_variant = os.environ.get("CORALL_PROMPT_ABLATION_VARIANT")
+    previous_variant = os.environ.get("RTRA_LLM_PROMPT_ABLATION_VARIANT")
 
     try:
         shutil.copy2(variant_file, ACTIVE_PROMPT)
-        os.environ["CORALL_PROMPT_ABLATION_VARIANT"] = variant["name"]
+        os.environ["RTRA_LLM_PROMPT_ABLATION_VARIANT"] = variant["name"]
         print(f"  [prompt] Activated: {variant['file']}")
         yield
     finally:
         if previous_variant is None:
-            os.environ.pop("CORALL_PROMPT_ABLATION_VARIANT", None)
+            os.environ.pop("RTRA_LLM_PROMPT_ABLATION_VARIANT", None)
         else:
-            os.environ["CORALL_PROMPT_ABLATION_VARIANT"] = previous_variant
+            os.environ["RTRA_LLM_PROMPT_ABLATION_VARIANT"] = previous_variant
         if backup_file is not None and backup_file.exists():
             shutil.copy2(backup_file, ACTIVE_PROMPT)
             backup_file.unlink(missing_ok=True)
@@ -211,14 +212,16 @@ def _extract_metrics(
         "paper_row": variant["paper_row"],
         "prompt_file": variant["file"],
         "case_number": case_number,
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
         "llm_provider": provider,
+        "model": results.get("llm_model", ""),
         # ── 核心指标 ──
         "N_call": int(results.get("llm_call_count", 0)),
         "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
         "R_max": float(np.max(risk)),
         "R_avg": _finite_mean(risk),
         "R_avg_positive": _finite_mean(risk[risk > 0]) if (risk > 0).any() else 0.0,
-        "min_dcpa_nm": float(np.min(results["dcpa"]) * METERS_TO_NMI),
+        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
         "delta_D_pct": _compute_delta_d(llm_dist_m, baseline_dist_m),
         "final_dist_nm": llm_dist_m * METERS_TO_NMI,
         "total_turns": count_turn_events(llm_kdir),
@@ -232,14 +235,15 @@ def run_one(
     variant: Dict[str, Any],
     case_number: int,
     base_args: SimpleNamespace,
-    baseline_cache: Dict[int, Dict],
+    baseline_cache: Dict[tuple, Dict],
 ) -> Optional[Dict[str, Any]]:
     from src.core.simulation import run_simulation, load_env_file
 
     load_env_file()
 
     # ── 缓存 baseline ──
-    if case_number not in baseline_cache:
+    cache_key = (case_number, int(base_args.seed))
+    if cache_key not in baseline_cache:
         b_args = copy(base_args)
         b_args.case_number = case_number
         b_args.llm = 0
@@ -251,13 +255,13 @@ def run_one(
         b_args.disable_rule_validator = False
         b_args.llm_trigger_mode = "risk"
         try:
-            baseline_cache[case_number] = run_simulation(b_args, return_data=True)
+            baseline_cache[cache_key] = run_simulation(b_args, return_data=True)
         except Exception as exc:
             print(f"  [ERROR] baseline case={case_number}: {exc}")
             traceback.print_exc()
             return None
 
-    baseline_res = baseline_cache[case_number]
+    baseline_res = baseline_cache[cache_key]
 
     args = copy(base_args)
     args.case_number = case_number
@@ -318,12 +322,11 @@ def _build_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "paper_row": group[0]["paper_row"],
             "prompt_file": group[0]["prompt_file"],
             "llm_provider": group[0]["llm_provider"],
-            "n_cases": len(group),
+            "model": group[0]["model"],
+            "n_cases": len({g["case_number"] for g in group}),
+            "n_seeds": len({g["seed"] for g in group}),
         }
-        for m in NUMERIC_METRICS:
-            vals = np.array([g[m] for g in group if g.get(m) is not None], dtype=float)
-            row[f"{m}_mean"] = float(np.mean(vals)) if vals.size > 0 else float("nan")
-            row[f"{m}_std"] = float(np.std(vals)) if vals.size > 0 else float("nan")
+        add_scene_summary(row, group, NUMERIC_METRICS)
         summary.append(row)
 
     summary.sort(key=lambda r: id_map.get(r["variant_name"], 99))
@@ -371,7 +374,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--sim_time", type=float, default=SIMULATION_TIME_S)
     p.add_argument("--dt", type=float, default=SIMULATION_DT_S)
-    p.add_argument("--seed", type=int, default=RANDOM_SEED, help="动力学随机扰动种子")
+    p.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS), help="动力学随机扰动种子")
+    p.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--risk_threshold", type=float, default=LLM_RISK_THRESHOLD)
     p.add_argument("--smoke", action="store_true",
                    help="冒烟测试：仅 case 1，sim_time=30s")
@@ -382,10 +386,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     cli = parse_args()
+    seeds = [cli.seed] if cli.seed is not None else list(cli.seeds)
 
     if cli.smoke:
         cli.cases = [1]
         cli.sim_time = 30.0
+        seeds = seeds[:1]
         print("[SMOKE TEST] Running case 1 only, sim_time=30s")
 
     from src.utils.imazu_cases import get_case_numbers
@@ -407,7 +413,7 @@ def main() -> None:
         llm_fixed_interval=250,
         sim_time=cli.sim_time,
         dt=cli.dt,
-        seed=cli.seed,
+        seed=seeds[0],
         output_dir=str(out_dir),
     )
 
@@ -422,19 +428,20 @@ def main() -> None:
         print("[ERROR] No valid prompt variants found. Check prompt/ directory.")
         sys.exit(1)
 
-    total_runs = len(variants) * len(cases)
+    total_runs = len(variants) * len(cases) * len(seeds)
     print("\n" + "=" * 70)
     print("RTRA-LLM PROMPT ABLATION")
     print("=" * 70)
     print(f"Provider       : {cli.provider}")
     print(f"Variants       : {[v['name'] for v in variants]}")
     print(f"Cases          : {cases}")
+    print(f"Seeds          : {seeds}")
     print(f"Sim time       : {cli.sim_time}s  |  dt={cli.dt}s")
     print(f"Total runs     : {total_runs}")
     print(f"Output dir     : {out_dir}")
     print("=" * 70)
 
-    baseline_cache: Dict[int, Dict] = {}
+    baseline_cache: Dict[tuple, Dict] = {}
     all_rows: List[Dict[str, Any]] = []
     failed_runs: List[tuple] = []
     run_idx = 0
@@ -446,23 +453,25 @@ def main() -> None:
         var_rows: List[Dict[str, Any]] = []
 
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | {variant['name']} ...", end=" ", flush=True)
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | {variant['name']} ...", end=" ", flush=True)
 
-            row = run_one(variant, case_number, base_args, baseline_cache)
-            if row is not None:
-                all_rows.append(row)
-                var_rows.append(row)
-                print(
-                    f"N_call={row['N_call']:3d}  "
-                    f"A_turn={row['A_turn_pct']:.1f}%  "
-                    f"R_max={row['R_max']:.3f}  "
-                    f"ΔD={row['delta_D_pct']:+.2f}%"
-                )
-            else:
-                failed_runs.append((variant["name"], case_number))
-                print("FAILED")
+                row = run_one(variant, case_number, base_args, baseline_cache)
+                if row is not None:
+                    all_rows.append(row)
+                    var_rows.append(row)
+                    print(
+                        f"N_call={row['N_call']:3d}  "
+                        f"A_turn={row['A_turn_pct']:.1f}%  "
+                        f"R_max={row['R_max']:.3f}  "
+                        f"ΔD={row['delta_D_pct']:+.2f}%"
+                    )
+                else:
+                    failed_runs.append((variant["name"], case_number, seed))
+                    print("FAILED")
 
         _write_csv(var_rows, out_dir / f"prompt_ablation_{variant['name']}.csv")
 
@@ -480,9 +489,9 @@ def main() -> None:
                 "meta": {
                     "timestamp": ts, "provider": cli.provider,
                     "variants": [v["name"] for v in variants],
-                    "cases": cases, "sim_time": cli.sim_time,
+                    "cases": cases, "seeds": seeds, "sim_time": cli.sim_time,
                     "low_level_planner": PAPER_LOW_LEVEL_PLANNER,
-                    "failed_runs": [{"variant": v, "case": n} for v, n in failed_runs],
+                    "failed_runs": [{"variant": v, "case": n, "seed": s} for v, n, s in failed_runs],
                 },
                 "raw": all_rows,
                 "summary": summary_rows,
@@ -498,8 +507,8 @@ def main() -> None:
     print(f"  Successful     : {len(all_rows)}")
     print(f"  Failed         : {len(failed_runs)}")
     if failed_runs:
-        for v, n in failed_runs:
-            print(f"    - variant={v}, case={n}")
+        for v, n, seed in failed_runs:
+            print(f"    - variant={v}, case={n}, seed={seed}")
     print(f"  Output dir     : {out_dir}")
     print("=" * 70)
 

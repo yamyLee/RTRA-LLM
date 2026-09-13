@@ -50,11 +50,13 @@ import numpy as np
 from src.config.paper_parameters import (
     LLM_RISK_THRESHOLD,
     PAPER_LOW_LEVEL_PLANNER,
+    PAPER_RANDOM_SEEDS,
     RANDOM_SEED,
     SIMULATION_DT_S,
     SIMULATION_TIME_S,
 )
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 _ROOT = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_ROOT))
@@ -136,10 +138,12 @@ def _extract_metrics(
     return {
         "provider": "LLM-baseline",
         "backend_provider": provider,
+        "model": results.get("llm_model", ""),
         "case_number": case_number,
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
         "R_max": float(np.max(risk)),
         "R_avg": _finite_mean(risk),
-        "min_dcpa_nm": float(np.min(results["dcpa"]) * METERS_TO_NMI),
+        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
         "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
         "delta_D_pct": _compute_delta_d(llm_dist_m, baseline_dist_m),
         "final_dist_nm": llm_dist_m * METERS_TO_NMI,
@@ -159,13 +163,14 @@ def run_one(
     provider: str,
     case_number: int,
     base_args: SimpleNamespace,
-    baseline_results_cache: Dict[int, Dict[str, Any]],
+    baseline_results_cache: Dict[tuple, Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
     from src.core.simulation import load_env_file, run_simulation
 
     load_env_file()
 
-    if case_number not in baseline_results_cache:
+    cache_key = (case_number, int(base_args.seed))
+    if cache_key not in baseline_results_cache:
         b_args = copy(base_args)
         b_args.case_number = case_number
         b_args.llm = 0
@@ -174,13 +179,13 @@ def run_one(
         b_args.compare = False
         b_args.no_animation = True
         try:
-            baseline_results_cache[case_number] = run_simulation(b_args, return_data=True)
+            baseline_results_cache[cache_key] = run_simulation(b_args, return_data=True)
         except Exception as exc:
             print(f"  [ERROR] baseline case={case_number}: {exc}")
             traceback.print_exc()
             return None
 
-    baseline_res = baseline_results_cache[case_number]
+    baseline_res = baseline_results_cache[cache_key]
 
     args = copy(base_args)
     args.case_number = case_number
@@ -231,17 +236,16 @@ def _build_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "provider": "LLM-baseline",
         "backend_provider": rows[0]["backend_provider"],
-        "n_cases": len(rows),
+        "model": rows[0]["model"],
+        "n_cases": len({item["case_number"] for item in rows}),
+        "n_seeds": len({item["seed"] for item in rows}),
         "trigger_mode": "fixed",
         "fixed_interval": rows[0]["fixed_interval"],
         "risk_threshold": rows[0]["risk_threshold"],
         "memory_enabled": False,
         "validator_enabled": False,
     }
-    for metric in NUMERIC_METRICS:
-        vals = np.array([r[metric] for r in rows if r.get(metric) is not None], dtype=float)
-        row[f"{metric}_mean"] = float(np.mean(vals)) if vals.size > 0 else float("nan")
-        row[f"{metric}_std"] = float(np.std(vals)) if vals.size > 0 else float("nan")
+    add_scene_summary(row, rows, NUMERIC_METRICS)
     return row
 
 
@@ -280,8 +284,9 @@ def parse_args() -> argparse.Namespace:
                         help="输出目录（默认自动生成）")
     parser.add_argument("--sim_time", type=float, default=SIMULATION_TIME_S)
     parser.add_argument("--dt", type=float, default=SIMULATION_DT_S)
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED,
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS),
                         help="动力学随机扰动种子")
+    parser.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--risk_threshold", type=float, default=LLM_RISK_THRESHOLD,
                         help="保留统一参数接口；fixed 模式下主要用于结果记录")
     parser.add_argument("--fixed_interval", type=int, default=250,
@@ -293,10 +298,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     cli = parse_args()
+    seeds = [cli.seed] if cli.seed is not None else list(cli.seeds)
 
     if cli.smoke:
         cli.cases = [1]
         cli.sim_time = 30.0
+        seeds = seeds[:1]
         print("[SMOKE TEST] Running case 1 only, sim_time=30s")
 
     from src.utils.imazu_cases import get_case_numbers
@@ -318,7 +325,7 @@ def main() -> None:
         disable_rule_validator=True,
         sim_time=cli.sim_time,
         dt=cli.dt,
-        seed=cli.seed,
+        seed=seeds[0],
         output_dir=str(out_dir),
     )
 
@@ -327,6 +334,7 @@ def main() -> None:
     print("=" * 72)
     print(f"Provider       : {cli.provider}")
     print(f"Cases          : {cases}")
+    print(f"Seeds          : {seeds}")
     print(f"Sim time       : {cli.sim_time}s  |  dt={cli.dt}s")
     print(f"Trigger mode   : fixed")
     print(f"Fixed interval : {cli.fixed_interval} steps")
@@ -335,24 +343,28 @@ def main() -> None:
     print(f"Output dir     : {out_dir}")
     print("=" * 72)
 
-    baseline_cache: Dict[int, Dict[str, Any]] = {}
+    baseline_cache: Dict[tuple, Dict[str, Any]] = {}
     rows: List[Dict[str, Any]] = []
-    failed_cases: List[int] = []
+    failed_cases: List[tuple] = []
 
-    for idx, case_number in enumerate(cases, start=1):
-        progress = f"[{idx:3d}/{len(cases)}]"
-        print(f"{progress} Case {case_number:2d} | LLM-baseline ...", end=" ", flush=True)
+    run_index = 0
+    for case_number in cases:
+        for seed in seeds:
+            base_args.seed = seed
+            run_index += 1
+            progress = f"[{run_index:3d}/{len(cases) * len(seeds)}]"
+            print(f"{progress} Case {case_number:2d} seed={seed} | LLM-baseline ...", end=" ", flush=True)
 
-        row = run_one(cli.provider, case_number, base_args, baseline_cache)
-        if row is not None:
-            rows.append(row)
-            print(
-                f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
-                f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
-            )
-        else:
-            failed_cases.append(case_number)
-            print("FAILED")
+            row = run_one(cli.provider, case_number, base_args, baseline_cache)
+            if row is not None:
+                rows.append(row)
+                print(
+                    f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
+                    f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                )
+            else:
+                failed_cases.append((case_number, seed))
+                print("FAILED")
 
     raw_csv_path = out_dir / "llm_baseline_raw.csv"
     summary_csv_path = out_dir / "llm_baseline_summary.csv"
@@ -374,6 +386,7 @@ def main() -> None:
                     "timestamp": ts,
                     "provider": cli.provider,
                     "cases": cases,
+                    "seeds": seeds,
                     "sim_time": cli.sim_time,
                     "dt": cli.dt,
                     "low_level_planner": PAPER_LOW_LEVEL_PLANNER,
@@ -381,7 +394,7 @@ def main() -> None:
                     "fixed_interval": cli.fixed_interval,
                     "memory_enabled": False,
                     "validator_enabled": False,
-                    "failed_cases": failed_cases,
+                    "failed_cases": [{"case": case, "seed": seed} for case, seed in failed_cases],
                 },
                 "raw": rows,
                 "summary": summary,

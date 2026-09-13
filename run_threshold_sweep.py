@@ -57,8 +57,9 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
+from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 # ── 项目根目录 ─────────────────────────────────────────────────────────────────
 _ROOT = Path(__file__).parent.resolve()
@@ -151,7 +152,9 @@ def _extract_metrics(
     return {
         "q": q,
         "case_number": case_number,
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
         "llm_provider": provider,
+        "model": results.get("llm_model", ""),
         # ── 效率指标 ──
         "N_call": int(results.get("llm_call_count", 0)),
         "trigger_events": int(len(results.get("llm_trigger_history", []))),
@@ -159,7 +162,7 @@ def _extract_metrics(
         "R_max": float(np.max(risk)),
         "R_avg": _finite_mean(risk),
         "R_avg_positive": _finite_mean(risk[risk > 0]) if (risk > 0).any() else 0.0,
-        "min_dcpa_nm": float(np.min(results["dcpa"]) * METERS_TO_NMI),
+        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
         # ── 机动一致性 ──
         "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
         # ── 路径效率 ──
@@ -178,7 +181,7 @@ def run_one(
     q: float,
     case_number: int,
     base_args: SimpleNamespace,
-    baseline_cache: Dict[int, Dict],
+    baseline_cache: Dict[tuple, Dict],
 ) -> Optional[Dict[str, Any]]:
     """运行 (q, case) 组合，出错返回 None。"""
     from src.core.simulation import run_simulation, load_env_file
@@ -186,7 +189,8 @@ def run_one(
     load_env_file()
 
     # ── 缓存 baseline（每 case 只跑一次）──
-    if case_number not in baseline_cache:
+    cache_key = (case_number, int(base_args.seed))
+    if cache_key not in baseline_cache:
         b_args = copy(base_args)
         b_args.case_number = case_number
         b_args.llm = 0
@@ -199,13 +203,13 @@ def run_one(
         b_args.disable_memory = False
         b_args.disable_rule_validator = False
         try:
-            baseline_cache[case_number] = run_simulation(b_args, return_data=True)
+            baseline_cache[cache_key] = run_simulation(b_args, return_data=True)
         except Exception as exc:
             print(f"  [ERROR] baseline case={case_number}: {exc}")
             traceback.print_exc()
             return None
 
-    baseline_res = baseline_cache[case_number]
+    baseline_res = baseline_cache[cache_key]
 
     # ── LLM 运行（完整配置，仅改 q）──
     args = copy(base_args)
@@ -267,12 +271,11 @@ def _build_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         row: Dict[str, Any] = {
             "q": q_val,
             "llm_provider": group[0]["llm_provider"],
-            "n_cases": len(group),
+            "model": group[0]["model"],
+            "n_cases": len({g["case_number"] for g in group}),
+            "n_seeds": len({g["seed"] for g in group}),
         }
-        for m in NUMERIC_METRICS:
-            vals = np.array([g[m] for g in group if g.get(m) is not None], dtype=float)
-            row[f"{m}_mean"] = float(np.mean(vals)) if vals.size > 0 else float("nan")
-            row[f"{m}_std"] = float(np.std(vals)) if vals.size > 0 else float("nan")
+        add_scene_summary(row, group, NUMERIC_METRICS)
         summary.append(row)
 
     return summary
@@ -468,7 +471,8 @@ def parse_args() -> argparse.Namespace:
                    help="输出目录（默认自动生成含时间戳目录）")
     p.add_argument("--sim_time", type=float, default=SIMULATION_TIME_S)
     p.add_argument("--dt", type=float, default=SIMULATION_DT_S)
-    p.add_argument("--seed", type=int, default=RANDOM_SEED, help="动力学随机扰动种子")
+    p.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS), help="动力学随机扰动种子")
+    p.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--smoke", action="store_true",
                    help="冒烟测试：仅 case 1，sim_time=30s")
     return p.parse_args()
@@ -478,10 +482,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     cli = parse_args()
+    seeds = [cli.seed] if cli.seed is not None else list(cli.seeds)
 
     if cli.smoke:
         cli.cases = [1]
         cli.sim_time = 30.0
+        seeds = seeds[:1]
         print("[SMOKE TEST] Running case 1 only, sim_time=30s")
 
     from src.utils.imazu_cases import get_case_numbers
@@ -505,11 +511,11 @@ def main() -> None:
         llm_fixed_interval=250,
         sim_time=cli.sim_time,
         dt=cli.dt,
-        seed=cli.seed,
+        seed=seeds[0],
         output_dir=str(out_dir),
     )
 
-    total_runs = len(thresholds) * len(cases)
+    total_runs = len(thresholds) * len(cases) * len(seeds)
     print("\n" + "=" * 70)
     print("RTRA-LLM THRESHOLD SENSITIVITY SWEEP")
     print("=" * 70)
@@ -517,12 +523,13 @@ def main() -> None:
     print(f"Thresholds q   : {thresholds}")
     print(f"Paper q        : {cli.paper_q}")
     print(f"Cases          : {cases}")
+    print(f"Seeds          : {seeds}")
     print(f"Sim time       : {cli.sim_time}s  |  dt={cli.dt}s")
     print(f"Total LLM runs : {total_runs}  (+ 1 baseline/case cached)")
     print(f"Output dir     : {out_dir}")
     print("=" * 70)
 
-    baseline_cache: Dict[int, Dict] = {}
+    baseline_cache: Dict[tuple, Dict] = {}
     all_rows: List[Dict[str, Any]] = []
     failed_runs: List[tuple] = []
     run_idx = 0
@@ -534,24 +541,26 @@ def main() -> None:
         q_rows: List[Dict[str, Any]] = []
 
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | q={q:.2f} ...", end=" ", flush=True)
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | q={q:.2f} ...", end=" ", flush=True)
 
-            row = run_one(q, case_number, base_args, baseline_cache)
-            if row is not None:
-                all_rows.append(row)
-                q_rows.append(row)
-                marker = " ★" if abs(q - cli.paper_q) < 1e-6 else ""
-                print(
-                    f"N_call={row['N_call']:3d}  "
-                    f"R_max={row['R_max']:.3f}  "
-                    f"A_turn={row['A_turn_pct']:.1f}%  "
-                    f"ΔD={row['delta_D_pct']:+.2f}%{marker}"
-                )
-            else:
-                failed_runs.append((q, case_number))
-                print("FAILED")
+                row = run_one(q, case_number, base_args, baseline_cache)
+                if row is not None:
+                    all_rows.append(row)
+                    q_rows.append(row)
+                    marker = " ★" if abs(q - cli.paper_q) < 1e-6 else ""
+                    print(
+                        f"N_call={row['N_call']:3d}  "
+                        f"R_max={row['R_max']:.3f}  "
+                        f"A_turn={row['A_turn_pct']:.1f}%  "
+                        f"ΔD={row['delta_D_pct']:+.2f}%{marker}"
+                    )
+                else:
+                    failed_runs.append((q, case_number, seed))
+                    print("FAILED")
 
         _write_csv(q_rows, out_dir / f"sweep_q{q:.2f}.csv".replace(".", "p"))
 
@@ -578,11 +587,12 @@ def main() -> None:
                     "thresholds": thresholds,
                     "paper_q": cli.paper_q,
                     "cases": cases,
+                    "seeds": seeds,
                     "sim_time": cli.sim_time,
                     "low_level_planner": PAPER_LOW_LEVEL_PLANNER,
                     "elbow_q": elbow_q,
                     "elbow_reason": elbow_reason,
-                    "failed_runs": [{"q": q, "case": n} for q, n in failed_runs],
+                    "failed_runs": [{"q": q, "case": n, "seed": s} for q, n, s in failed_runs],
                 },
                 "raw": all_rows,
                 "summary": summary_rows,
@@ -604,8 +614,8 @@ def main() -> None:
     print(f"  Successful     : {len(all_rows)}")
     print(f"  Failed         : {len(failed_runs)}")
     if failed_runs:
-        for q_val, case_n in failed_runs:
-            print(f"    - q={q_val:.2f}, case={case_n}")
+        for q_val, case_n, seed in failed_runs:
+            print(f"    - q={q_val:.2f}, case={case_n}, seed={seed}")
     print(f"  Elbow q*       : {elbow_q}  ({elbow_reason})")
     print(f"  Paper q        : {cli.paper_q}")
     print(f"  Output dir     : {out_dir}")

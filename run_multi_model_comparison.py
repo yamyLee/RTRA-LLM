@@ -52,11 +52,14 @@ import numpy as np
 from src.config.paper_parameters import (
     LLM_RISK_THRESHOLD,
     PAPER_LOW_LEVEL_PLANNER,
+    PAPER_MODEL_DISPLAY_BY_PROVIDER,
+    PAPER_RANDOM_SEEDS,
     RANDOM_SEED,
     SIMULATION_DT_S,
     SIMULATION_TIME_S,
 )
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 # ── 项目根目录 ────────────────────────────────────────────────────────────────
 _ROOT = Path(__file__).parent.resolve()
@@ -150,12 +153,23 @@ def _extract_metrics(
 
     return {
         "provider": provider,
+        "comparison_method": (
+            "RTRA-LLM"
+            if backend_provider.lower() == "qwen" and provider != "LLM-baseline"
+            else "RTRA-LLM-DeepSeek-V3.2"
+            if backend_provider.lower() == "deepseek" and provider != "LLM-baseline"
+            else "RTRA-LLM-MiniMax-M2.5"
+            if backend_provider.lower() == "minimax" and provider != "LLM-baseline"
+            else provider
+        ),
         "backend_provider": backend_provider,
         "case_number": case_number,
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
+        "model": results.get("llm_model", ""),
         # 安全指标
         "R_max": float(np.max(risk)),
         "R_avg": _finite_mean(risk),
-        "min_dcpa_nm": float(np.min(results["dcpa"]) * METERS_TO_NMI),
+        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
         # 机动一致性
         "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
         # 路径效率
@@ -179,7 +193,7 @@ def run_one(
     provider: str,
     case_number: int,
     base_args: SimpleNamespace,
-    baseline_results_cache: Dict[int, Dict],
+    baseline_results_cache: Dict[tuple, Dict],
     *,
     display_name: Optional[str] = None,
     trigger_mode: str = "risk",
@@ -194,7 +208,8 @@ def run_one(
     load_env_file()
 
     # ── 获取 baseline（仅首次运行时计算，之后复用缓存）──
-    if case_number not in baseline_results_cache:
+    cache_key = (case_number, int(base_args.seed))
+    if cache_key not in baseline_results_cache:
         b_args = copy(base_args)
         b_args.case_number = case_number
         b_args.llm = 0
@@ -203,13 +218,13 @@ def run_one(
         b_args.compare = False
         b_args.no_animation = True
         try:
-            baseline_results_cache[case_number] = run_simulation(b_args, return_data=True)
+            baseline_results_cache[cache_key] = run_simulation(b_args, return_data=True)
         except Exception as exc:
             print(f"  [ERROR] baseline case={case_number}: {exc}")
             traceback.print_exc()
             return None
 
-    baseline_res = baseline_results_cache[case_number]
+    baseline_res = baseline_results_cache[cache_key]
 
     # ── 运行 LLM ──
     args = copy(base_args)
@@ -275,16 +290,15 @@ def _build_summary(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for prov, group in groups.items():
         row: Dict[str, Any] = {
             "provider": prov,
-            "n_cases": len(group),
+            "n_cases": len({g["case_number"] for g in group}),
+            "n_seeds": len({g["seed"] for g in group}),
+            "model": group[0].get("model", ""),
             "backend_provider": group[0].get("backend_provider", prov),
             "trigger_mode": group[0]["trigger_mode"],
             "fixed_interval": group[0].get("fixed_interval", 0),
             "risk_threshold": group[0]["risk_threshold"],
         }
-        for m in NUMERIC_METRICS:
-            vals = np.array([g[m] for g in group if g.get(m) is not None], dtype=float)
-            row[f"{m}_mean"] = float(np.mean(vals)) if vals.size > 0 else float("nan")
-            row[f"{m}_std"] = float(np.std(vals)) if vals.size > 0 else float("nan")
+        add_scene_summary(row, group, NUMERIC_METRICS)
         summary.append(row)
 
     return summary
@@ -329,7 +343,8 @@ def parse_args() -> argparse.Namespace:
                    help="输出目录（默认自动生成含时间戳目录）")
     p.add_argument("--sim_time", type=float, default=SIMULATION_TIME_S)
     p.add_argument("--dt", type=float, default=SIMULATION_DT_S)
-    p.add_argument("--seed", type=int, default=RANDOM_SEED, help="动力学随机扰动种子")
+    p.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS), help="动力学随机扰动种子")
+    p.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     p.add_argument("--risk_threshold", type=float, default=LLM_RISK_THRESHOLD)
     p.add_argument("--include_llm_baseline", action="store_true",
                    help="附加一行 LLM-baseline：固定频率调用 LLM，关闭记忆与规则验证")
@@ -348,10 +363,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     cli = parse_args()
+    seeds = [cli.seed] if cli.seed is not None else list(cli.seeds)
 
     if cli.smoke:
         cli.cases = [1]
         cli.sim_time = 30.0
+        seeds = seeds[:1]
         print("[SMOKE TEST] Running case 1 only, sim_time=30s")
 
     from src.utils.imazu_cases import get_case_numbers
@@ -375,7 +392,7 @@ def main() -> None:
         disable_rule_validator=False,
         sim_time=cli.sim_time,
         dt=cli.dt,
-        seed=cli.seed,
+        seed=seeds[0],
         output_dir=str(out_dir),
     )
 
@@ -383,7 +400,7 @@ def main() -> None:
     llm_baseline_provider = cli.llm_baseline_provider or cli.providers[0]
     include_rule_trigger = cli.include_rule_trigger
     extra_methods = int(include_llm_baseline) + int(include_rule_trigger)
-    total_runs = (len(cli.providers) + extra_methods) * len(cases)
+    total_runs = (len(cli.providers) + extra_methods) * len(cases) * len(seeds)
     print("\n" + "=" * 70)
     print("RTRA-LLM MULTI-MODEL COMPARISON")
     print("=" * 70)
@@ -393,6 +410,7 @@ def main() -> None:
     else:
         print("LLM-baseline   : off")
     print(f"Cases          : {cases}")
+    print(f"Seeds          : {seeds}")
     print(f"Sim time       : {cli.sim_time}s  |  dt={cli.dt}s")
     print(f"Risk threshold : {cli.risk_threshold}")
     print(f"Total LLM runs : {total_runs}  (+ 1 baseline/case cached)")
@@ -400,7 +418,7 @@ def main() -> None:
     print("=" * 70)
 
     # baseline 缓存：每个 case 只跑一次 baseline，所有 provider 复用
-    baseline_cache: Dict[int, Dict] = {}
+    baseline_cache: Dict[tuple, Dict] = {}
     all_rows: List[Dict[str, Any]] = []
     failed_runs: List[tuple] = []
     run_idx = 0
@@ -412,21 +430,29 @@ def main() -> None:
         prov_rows: List[Dict[str, Any]] = []
 
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | {provider} ...", end=" ", flush=True)
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | {provider} ...", end=" ", flush=True)
 
-            row = run_one(provider, case_number, base_args, baseline_cache)
-            if row is not None:
-                all_rows.append(row)
-                prov_rows.append(row)
-                print(
-                    f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
-                    f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                row = run_one(
+                    provider,
+                    case_number,
+                    base_args,
+                    baseline_cache,
+                    display_name=PAPER_MODEL_DISPLAY_BY_PROVIDER.get(provider.lower(), provider),
                 )
-            else:
-                failed_runs.append((provider, case_number))
-                print("FAILED")
+                if row is not None:
+                    all_rows.append(row)
+                    prov_rows.append(row)
+                    print(
+                        f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
+                        f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                    )
+                else:
+                    failed_runs.append((provider, case_number, seed))
+                    print("FAILED")
 
         _write_csv(prov_rows, out_dir / f"multi_model_{provider}.csv")
 
@@ -436,31 +462,33 @@ def main() -> None:
         print(f"{'─'*60}")
         baseline_method_rows: List[Dict[str, Any]] = []
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | LLM-baseline ...", end=" ", flush=True)
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | LLM-baseline ...", end=" ", flush=True)
 
-            row = run_one(
-                llm_baseline_provider,
-                case_number,
-                base_args,
-                baseline_cache,
-                display_name="LLM-baseline",
-                trigger_mode="fixed",
-                fixed_interval=cli.llm_baseline_interval,
-                disable_memory=True,
-                disable_rule_validator=True,
-            )
-            if row is not None:
-                all_rows.append(row)
-                baseline_method_rows.append(row)
-                print(
-                    f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
-                    f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                row = run_one(
+                    llm_baseline_provider,
+                    case_number,
+                    base_args,
+                    baseline_cache,
+                    display_name="LLM-baseline",
+                    trigger_mode="fixed",
+                    fixed_interval=cli.llm_baseline_interval,
+                    disable_memory=True,
+                    disable_rule_validator=True,
                 )
-            else:
-                failed_runs.append(("LLM-baseline", case_number))
-                print("FAILED")
+                if row is not None:
+                    all_rows.append(row)
+                    baseline_method_rows.append(row)
+                    print(
+                        f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
+                        f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                    )
+                else:
+                    failed_runs.append(("LLM-baseline", case_number, seed))
+                    print("FAILED")
 
         _write_csv(baseline_method_rows, out_dir / "multi_model_LLM-baseline.csv")
 
@@ -470,43 +498,48 @@ def main() -> None:
         print(f"{'─'*60}")
         rule_rows: List[Dict[str, Any]] = []
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | Rule-trigger ...", end=" ", flush=True)
-            row = run_one(
-                "rule",
-                case_number,
-                base_args,
-                baseline_cache,
-                display_name="Rule-trigger baseline",
-                rule_baseline=True,
-            )
-            if row is not None:
-                all_rows.append(row)
-                rule_rows.append(row)
-                print(
-                    f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
-                    f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | Rule-trigger ...", end=" ", flush=True)
+                row = run_one(
+                    "rule",
+                    case_number,
+                    base_args,
+                    baseline_cache,
+                    display_name="Rule-trigger baseline",
+                    rule_baseline=True,
                 )
-            else:
-                failed_runs.append(("Rule-trigger baseline", case_number))
-                print("FAILED")
+                if row is not None:
+                    all_rows.append(row)
+                    rule_rows.append(row)
+                    print(
+                        f"R_max={row['R_max']:.3f}  A_turn={row['A_turn_pct']:.1f}%  "
+                        f"ΔD={row['delta_D_pct']:+.2f}%  N_call={row['N_call']}"
+                    )
+                else:
+                    failed_runs.append(("Rule-trigger baseline", case_number, seed))
+                    print("FAILED")
         _write_csv(rule_rows, out_dir / "multi_model_Rule-trigger-baseline.csv")
 
     # 写出 baseline 结果
     baseline_rows = []
-    for case_number, br in baseline_cache.items():
+    for (case_number, seed), br in baseline_cache.items():
         risk = br["risk"]
         kdir = np.asarray(br["kdir"])
         x_arr = np.asarray(br["x"])
         y_arr = np.asarray(br["y"])
         baseline_rows.append({
             "provider": "baseline",
+            "comparison_method": "Baseline",
             "backend_provider": "none",
             "case_number": case_number,
+            "seed": seed,
+            "model": "",
             "R_max": float(np.max(risk)),
             "R_avg": _finite_mean(risk),
-            "min_dcpa_nm": float(np.min(br["dcpa"]) * METERS_TO_NMI),
+            "min_dcpa_nm": float(np.min(np.abs(br["dcpa"])) * METERS_TO_NMI),
             "A_turn_pct": 100.0,
             "delta_D_pct": 0.0,
             "final_dist_nm": float(np.sqrt(x_arr[-1] ** 2 + y_arr[-1] ** 2)) * METERS_TO_NMI,
@@ -531,13 +564,13 @@ def main() -> None:
             {
                 "meta": {
                     "timestamp": ts, "providers": cli.providers,
-                    "cases": cases, "sim_time": cli.sim_time, "dt": cli.dt,
+                    "cases": cases, "seeds": seeds, "sim_time": cli.sim_time, "dt": cli.dt,
                     "low_level_planner": PAPER_LOW_LEVEL_PLANNER,
                     "risk_threshold": cli.risk_threshold,
                     "include_llm_baseline": include_llm_baseline,
                     "llm_baseline_provider": llm_baseline_provider if include_llm_baseline else None,
                     "llm_baseline_interval": cli.llm_baseline_interval if include_llm_baseline else None,
-                    "failed_runs": [{"provider": p, "case": n} for p, n in failed_runs],
+                    "failed_runs": [{"provider": p, "case": n, "seed": s} for p, n, s in failed_runs],
                 },
                 "raw": all_rows_with_baseline,
                 "summary": summary_rows,
@@ -554,8 +587,8 @@ def main() -> None:
     print(f"  Successful     : {len(all_rows)}")
     print(f"  Failed         : {len(failed_runs)}")
     if failed_runs:
-        for p, n in failed_runs:
-            print(f"    - provider={p}, case={n}")
+        for p, n, s in failed_runs:
+            print(f"    - provider={p}, case={n}, seed={s}")
     print(f"  Output dir     : {out_dir}")
     print("=" * 70)
 

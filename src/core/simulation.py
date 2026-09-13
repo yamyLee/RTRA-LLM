@@ -16,12 +16,13 @@ from src.dynamics.controller import controller
 from src.dynamics.actuator_modeling import actuator_modeling
 from src.risk_assessment.risk_calculations import risk_calculations
 from src.navigation.reactive_avoidance import reactive_avoidance
-from src.navigation.velocity_obstacle import velocity_obstacle_avoidance
+from src.navigation.velocity_obstacle import apply_direction_constraint, velocity_obstacle_avoidance
 from src.visualization.animate import animate_step
 from src.utils.imazu_cases import nautical_to_meters, get_obstacle_data
 from src.config.paper_parameters import (
     ACTUATOR_SATURATION,
     LLM_FIXED_INTERVAL_STEPS,
+    LLM_HIGH_LEVEL_UPDATE_STEPS,
     LLM_RISK_THRESHOLD,
     PAPER_LOW_LEVEL_PLANNER,
     OWN_SHIP_BEAM_M,
@@ -167,12 +168,14 @@ def parse_args():
                        help='OpenAI-compatible LLM provider to use (for example: openai, zhipu, qwen, deepseek, kimi). If not specified, uses LLM_PROVIDER from .env')
     parser.add_argument('--compare', action='store_true', 
                        help='Run comparison between LLM and baseline simulation')
-    parser.add_argument('--llm_trigger_mode', choices=['risk', 'fixed', 'always'], default='risk',
-                       help='LLM trigger strategy: risk=paper method, fixed=fixed-interval ablation, always=call every step')
+    parser.add_argument('--llm_trigger_mode', choices=['risk', 'fixed', 'always', 'high_level_always'], default='risk',
+                       help='LLM trigger strategy')
     parser.add_argument('--llm_risk_threshold', type=float, default=LLM_RISK_THRESHOLD,
                        help='Risk threshold q for triggering LLM supervision')
     parser.add_argument('--llm_fixed_interval', type=int, default=LLM_FIXED_INTERVAL_STEPS,
                        help='Fixed trigger interval in simulation steps when --llm_trigger_mode fixed is used')
+    parser.add_argument('--llm_high_level_update_steps', type=int, default=LLM_HIGH_LEVEL_UPDATE_STEPS,
+                       help='High-level decision period for the w/o Risk Trigger ablation')
     parser.add_argument('--low_level_planner', choices=['reactive', 'vo'], default=PAPER_LOW_LEVEL_PLANNER,
                        help='Low-level planner used by the paper experiments')
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -193,6 +196,7 @@ def ensure_arg_defaults(args):
         'llm_trigger_mode': 'risk',
         'llm_risk_threshold': LLM_RISK_THRESHOLD,
         'llm_fixed_interval': LLM_FIXED_INTERVAL_STEPS,
+        'llm_high_level_update_steps': LLM_HIGH_LEVEL_UPDATE_STEPS,
         'disable_memory': False,
         'disable_rule_validator': False,
         'rule_baseline': False,
@@ -218,6 +222,7 @@ def initialize_llm_supervisor(args):
             risk_threshold=args.llm_risk_threshold,
             trigger_mode=args.llm_trigger_mode,
             fixed_interval=args.llm_fixed_interval,
+            high_level_update_steps=args.llm_high_level_update_steps,
             enable_memory=not args.disable_memory,
             enable_validator=not args.disable_rule_validator,
             rule_only=True,
@@ -231,6 +236,7 @@ def initialize_llm_supervisor(args):
         risk_threshold=args.llm_risk_threshold,
         trigger_mode=args.llm_trigger_mode,
         fixed_interval=args.llm_fixed_interval,
+        high_level_update_steps=args.llm_high_level_update_steps,
         enable_memory=not args.disable_memory,
         enable_validator=not args.disable_rule_validator,
     )
@@ -430,9 +436,9 @@ def run_simulation(args=None, return_data=False):
                     Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i], t)
                 if llm_supervisor is not None:
                     Kdir[i] = llm_current_kdir
+                    psi_oa[i] = apply_direction_constraint(psi_oa[i], llm_current_kdir)
 
-                # Overall yaw command with Kdir
-                psi_p[i] = psi_wp[i] + Kdir[i] * psi_oa[i]
+                psi_p[i] = psi_wp[i] + psi_oa[i]
 
                 # Controller and actuator
                 tau_c[i], v_c[i], ui_psi1 = controller(
@@ -551,9 +557,9 @@ def run_simulation(args=None, return_data=False):
                 Xob_nmi, Yob_nmi, x_nmi[i], y_nmi[i], psi[i], t)
             if llm_supervisor is not None:
                 Kdir[i] = llm_current_kdir
+                psi_oa[i] = apply_direction_constraint(psi_oa[i], llm_current_kdir)
 
-            # Overall yaw command with Kdir
-            psi_p[i] = psi_wp[i] + Kdir[i] * psi_oa[i]
+            psi_p[i] = psi_wp[i] + psi_oa[i]
 
             # Controller and actuator
             tau_c[i], v_c[i], ui_psi1 = controller(
@@ -665,7 +671,7 @@ def run_simulation(args=None, return_data=False):
         print(f"Total simulation steps: {len(time)}")
 
         if len(Xob) > 0:
-            min_dcpa = np.min(DCPA) / 1852
+            min_dcpa = np.min(np.abs(DCPA)) / 1852
             max_risk = np.max(Risk)
             print(f"Minimum DCPA: {min_dcpa:.2f} nautical miles")
             print(f"Maximum Risk: {max_risk:.3f}")
@@ -693,26 +699,21 @@ def run_simulation(args=None, return_data=False):
 
     # Return data if requested (for comparison mode)
     if return_data:
-        # Calculate Kdir for comparison based on actual control values
-        # Kdir = 0 when Kdir[i] * psi_oa[i] == 0 (no turn)
-        # Kdir = +1 when Kdir[i] * psi_oa[i] > 0 (starboard)
-        # Kdir = -1 when Kdir[i] * psi_oa[i] < 0 (port)
         comparison_kdir = np.zeros(len(Kdir))
         for i in range(len(Kdir)):
-            control_value = Kdir[i] * psi_oa[i]
-            if control_value > 0:
-                comparison_kdir[i] = 1  # Starboard
-            elif control_value < 0:
-                comparison_kdir[i] = -1  # Port
+            if psi_oa[i] < 0:
+                comparison_kdir[i] = 1
+            elif psi_oa[i] > 0:
+                comparison_kdir[i] = -1
             else:
-                comparison_kdir[i] = 0  # No turn
+                comparison_kdir[i] = 0
         
         return {
             'time': time,
             'x': x,
             'y': y,
             'psi': psi,
-            'kdir': comparison_kdir,  # Use calculated comparison values
+            'kdir': comparison_kdir,
             'control_kdir': Kdir.copy(),
             'risk': Risk,
             'dcpa': DCPA,
@@ -731,7 +732,10 @@ def run_simulation(args=None, return_data=False):
             'llm_call_count': llm_supervisor.call_count if llm_supervisor is not None else 0,
             'llm_trigger_history': llm_supervisor.trigger_history if llm_supervisor is not None else [],
             'llm_trigger_mode': args.llm_trigger_mode,
+            'llm_fixed_interval': args.llm_fixed_interval,
+            'llm_high_level_update_steps': args.llm_high_level_update_steps,
             'llm_risk_threshold': args.llm_risk_threshold,
+            'llm_model': llm_supervisor.model_name if llm_supervisor is not None else '',
             'llm_memory_enabled': not args.disable_memory,
             'llm_validator_enabled': not args.disable_rule_validator,
             'rule_baseline': args.rule_baseline,

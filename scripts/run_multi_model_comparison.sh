@@ -51,7 +51,7 @@ fi
 
 # ── 打印运行信息 ──────────────────────────────────────────────────────────────
 echo "======================================================================"
-echo " CORALL MULTI-MODEL COMPARISON"
+echo " RTRA-LLM MULTI-MODEL COMPARISON"
 echo "======================================================================"
 echo " Providers   : $PROVIDERS"
 echo " Smoke       : $SMOKE"

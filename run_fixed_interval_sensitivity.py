@@ -42,11 +42,13 @@ import numpy as np
 from src.config.paper_parameters import (
     LLM_RISK_THRESHOLD,
     PAPER_LOW_LEVEL_PLANNER,
+    PAPER_RANDOM_SEEDS,
     RANDOM_SEED,
     SIMULATION_DT_S,
     SIMULATION_TIME_S,
 )
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -166,10 +168,19 @@ def _extract_metrics(
 
     return {
         "method": method,
+        "comparison_method": (
+            "RTRA-LLM"
+            if schedule == "risk"
+            else "Fixed-LLM-Matched"
+            if configuration == "matched" and interval_steps == 500
+            else f"Fixed-LLM-{interval_steps}"
+        ),
         "schedule": schedule,
         "configuration": configuration,
         "backend_provider": provider,
+        "model": results.get("llm_model", ""),
         "case_number": int(case_number),
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
         "sim_time_s": float(sim_time),
         "dt_s": float(dt),
         "sim_steps": steps,
@@ -177,7 +188,7 @@ def _extract_metrics(
         "interval_seconds": interval_seconds,
         "R_max": float(np.nanmax(risk)) if risk.size else 0.0,
         "R_avg": _finite_mean(risk),
-        "min_dcpa_nm": float(np.nanmin(np.asarray(results["dcpa"], dtype=float)) * METERS_TO_NMI),
+        "min_dcpa_nm": float(np.nanmin(np.abs(np.asarray(results["dcpa"], dtype=float))) * METERS_TO_NMI),
         "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
         "delta_D_pct": _compute_delta_d(llm_final_dist_m, baseline_final_dist_m),
         "final_dist_nm": llm_final_dist_m * METERS_TO_NMI,
@@ -197,7 +208,7 @@ def _run_condition(
     *,
     base_args: SimpleNamespace,
     case_number: int,
-    baseline_results: Dict[int, Dict[str, Any]],
+    baseline_results: Dict[tuple, Dict[str, Any]],
     method: str,
     schedule: str,
     interval_steps: Optional[int],
@@ -206,13 +217,14 @@ def _run_condition(
 ) -> Optional[Dict[str, Any]]:
     from src.core.simulation import run_simulation
 
-    if case_number not in baseline_results:
+    cache_key = (case_number, int(base_args.seed))
+    if cache_key not in baseline_results:
         baseline_args = copy(base_args)
         baseline_args.case_number = case_number
         baseline_args.llm = 0
         baseline_args.low_level_planner = PAPER_LOW_LEVEL_PLANNER
         baseline_args.llm_provider = None
-        baseline_results[case_number] = run_simulation(baseline_args, return_data=True)
+        baseline_results[cache_key] = run_simulation(baseline_args, return_data=True)
 
     args = copy(base_args)
     args.case_number = case_number
@@ -228,7 +240,7 @@ def _run_condition(
         results = run_simulation(args, return_data=True)
         return _extract_metrics(
             results,
-            baseline_results[case_number],
+            baseline_results[cache_key],
             case_number=case_number,
             provider=provider,
             method=method,
@@ -260,16 +272,15 @@ def _summarize(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "schedule": first["schedule"],
             "configuration": first["configuration"],
             "backend_provider": first["backend_provider"],
-            "n_cases": len(group),
+            "model": first["model"],
+            "n_cases": len({row["case_number"] for row in group}),
+            "n_seeds": len({row["seed"] for row in group}),
             "interval_steps": interval_steps,
             "interval_seconds": first["interval_seconds"],
             "sim_time_s": first["sim_time_s"],
             "dt_s": first["dt_s"],
         }
-        for metric in NUMERIC_METRICS:
-            values = np.asarray([row[metric] for row in group], dtype=float)
-            summary[f"{metric}_mean"] = float(np.mean(values))
-            summary[f"{metric}_std"] = float(np.std(values))
+        add_scene_summary(summary, group, NUMERIC_METRICS)
         summaries.append(summary)
     return summaries
 
@@ -316,7 +327,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cases", nargs="+", type=int, default=None, help="Case numbers; default is all Imazu cases")
     parser.add_argument("--sim_time", type=float, default=SIMULATION_TIME_S)
     parser.add_argument("--dt", type=float, default=SIMULATION_DT_S)
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED, help="动力学随机扰动种子")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS), help="动力学随机扰动种子")
+    parser.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--risk_threshold", type=float, default=LLM_RISK_THRESHOLD)
     parser.add_argument("--output_dir", type=Path, default=None)
     parser.add_argument("--include-rtra", action="store_true", help="Also run the event-triggered RTRA reference")
@@ -327,6 +339,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     namespace = parse_args()
+    seeds = [namespace.seed] if namespace.seed is not None else list(namespace.seeds)
     if any(interval <= 0 for interval in namespace.intervals):
         raise SystemExit("All fixed intervals must be positive integers.")
     if namespace.dt <= 0 or namespace.sim_time <= 0:
@@ -335,6 +348,9 @@ def main() -> int:
     if namespace.smoke:
         namespace.cases = [1]
         namespace.sim_time = min(namespace.sim_time, 30.0)
+        seeds = seeds[:1]
+
+    namespace.seed = seeds[0]
 
     cases = _case_numbers(namespace.cases)
     base_args = _make_base_args(namespace)
@@ -343,6 +359,7 @@ def main() -> int:
         conditions.append(("RTRA-LLM", "risk", None))
 
     print(f"Cases: {cases}")
+    print(f"Seeds: {seeds}")
     print(f"Conditions: {[(method, interval) for method, _, interval in conditions]}")
     print(f"Configuration: {namespace.configuration}; sim_time={namespace.sim_time}s; dt={namespace.dt}s")
 
@@ -358,25 +375,27 @@ def main() -> int:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_results: Dict[int, Dict[str, Any]] = {}
+    baseline_results: Dict[tuple, Dict[str, Any]] = {}
     raw_rows: List[Dict[str, Any]] = []
     for method, schedule, interval_steps in conditions:
         print(f"\nRunning {method} ({'RTRA' if interval_steps is None else f'{interval_steps} steps'})")
         for case_number in cases:
-            print(f"  case={case_number}")
-            condition_configuration = "matched" if schedule == "risk" else namespace.configuration
-            row = _run_condition(
-                base_args=base_args,
-                case_number=case_number,
-                baseline_results=baseline_results,
-                method=method,
-                schedule=schedule,
-                interval_steps=interval_steps,
-                configuration=condition_configuration,
-                provider=namespace.provider,
-            )
-            if row is not None:
-                raw_rows.append(row)
+            for seed in seeds:
+                base_args.seed = seed
+                print(f"  case={case_number}, seed={seed}")
+                condition_configuration = "matched" if schedule == "risk" else namespace.configuration
+                row = _run_condition(
+                    base_args=base_args,
+                    case_number=case_number,
+                    baseline_results=baseline_results,
+                    method=method,
+                    schedule=schedule,
+                    interval_steps=interval_steps,
+                    configuration=condition_configuration,
+                    provider=namespace.provider,
+                )
+                if row is not None:
+                    raw_rows.append(row)
 
     summary_rows = _summarize(raw_rows)
     _write_csv(raw_rows, output_dir / "raw_results.csv")
@@ -386,6 +405,7 @@ def main() -> int:
         "provider": namespace.provider,
         "configuration": namespace.configuration,
         "cases": cases,
+        "seeds": seeds,
         "intervals_steps": namespace.intervals,
         "include_rtra": namespace.include_rtra,
         "sim_time_s": namespace.sim_time,

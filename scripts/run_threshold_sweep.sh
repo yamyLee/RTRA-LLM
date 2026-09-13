@@ -57,7 +57,7 @@ fi
 
 # ── 打印运行信息 ──────────────────────────────────────────────────────────────
 echo "======================================================================"
-echo " CORALL THRESHOLD SWEEP — RISK TRIGGER SENSITIVITY"
+echo " RTRA-LLM THRESHOLD SWEEP — RISK TRIGGER SENSITIVITY"
 echo "======================================================================"
 echo " Provider    : $PROVIDER"
 echo " Smoke       : $SMOKE"

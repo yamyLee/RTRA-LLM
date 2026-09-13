@@ -3,6 +3,7 @@ simulation:
   default_time: 450.0          
   default_dt: 0.1              
   random_seed: 42
+  paper_random_seeds: [42, 43, 44, 45, 46]
   default_case: 1              
   output_directory: "img/"     
   animation_fps: 5             
@@ -98,14 +99,15 @@ visualization:
 # LLM Configuration (Optional)
 llm:
   enabled: false
-  provider: "zhipu"
-  model: "glm-4.5"
+  provider: "qwen"
+  model: "qwen3.5-plus"
   base_url: ""
   temperature: 0.1
   max_tokens: 500
-  trigger_mode: "risk"        # risk, fixed, always
+  trigger_mode: "risk"        # risk, fixed, always, high_level_always
   risk_threshold: 0.30
   fixed_interval: 250
+  high_level_update_steps: 20
   enable_memory: true
   enable_rule_validator: true
   prompt_path: "prompt/prompt.txt"

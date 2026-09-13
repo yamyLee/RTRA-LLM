@@ -7,18 +7,20 @@ from enum import Enum
 from typing import List, Optional, Sequence
 
 import numpy as np
-from src.config.paper_parameters import LLM_FIXED_INTERVAL_STEPS, LLM_RISK_THRESHOLD
+from src.config.paper_parameters import (
+    LLM_FIXED_INTERVAL_STEPS,
+    LLM_HIGH_LEVEL_UPDATE_STEPS,
+    LLM_RISK_THRESHOLD,
+)
 
 from src.decision_making.multi_llm_decision import COLREGSInterpreter, VesselState
 
 
 class Action(str, Enum):
-    """Discrete high-level maneuver actions used by the LLM supervisor."""
-
-    STAND_ON = "Stand on, no action"
-    STARBOARD = "Give-way, turn to starboard"
-    PORT = "Give-way, turn to port"
-    CONTINUE = "Continue current maneuver"
+    A0 = "a_0"
+    AR = "a_R"
+    AL = "a_L"
+    AC = "a_C"
 
 
 @dataclass
@@ -43,7 +45,7 @@ class ManeuverMemory:
             f"- Previous executed action: {last_action}\n"
             f"- Maneuver active: {active}\n"
             f"- Maneuver duration steps: {self.maneuver_steps}\n"
-            "- If the previous maneuver remains compliant, prefer Continue current maneuver."
+            "- If the previous maneuver remains compliant, prefer a_C."
         )
 
 
@@ -88,6 +90,7 @@ class RiskTriggeredLLMSupervisor:
         risk_threshold: float = LLM_RISK_THRESHOLD,
         trigger_mode: str = "risk",
         fixed_interval: int = LLM_FIXED_INTERVAL_STEPS,
+        high_level_update_steps: int = LLM_HIGH_LEVEL_UPDATE_STEPS,
         enable_memory: bool = True,
         enable_validator: bool = True,
         rule_only: bool = False,
@@ -96,6 +99,7 @@ class RiskTriggeredLLMSupervisor:
         self.risk_threshold = float(risk_threshold)
         self.trigger_mode = trigger_mode
         self.fixed_interval = max(1, int(fixed_interval))
+        self.high_level_update_steps = max(1, int(high_level_update_steps))
         self.enable_memory = enable_memory
         self.enable_validator = enable_validator
         self.rule_only = rule_only
@@ -113,6 +117,12 @@ class RiskTriggeredLLMSupervisor:
     def available(self) -> bool:
         """Whether the underlying LLM provider is configured and usable."""
         return self.interpreter.provider is not None
+
+    @property
+    def model_name(self) -> str:
+        provider = self.interpreter.provider
+        provider = getattr(provider, "provider", provider)
+        return str(getattr(provider, "model", ""))
 
     def update(
         self,
@@ -132,8 +142,8 @@ class RiskTriggeredLLMSupervisor:
         if not vessels:
             return DecisionResult(
                 kdir=0,
-                final_action=Action.STAND_ON,
-                candidate_action=Action.STAND_ON,
+                final_action=Action.A0,
+                candidate_action=Action.A0,
                 encounter_type="none",
                 key_vessel_index=-1,
                 key_risk=0.0,
@@ -149,7 +159,9 @@ class RiskTriggeredLLMSupervisor:
             own_heading=own_heading,
         )
         validation_targets = self._build_validation_targets(vessels, own_heading=own_heading)
-        trigger_reasons = self._trigger_reasons(step, key_vessel.risk, encounter_type)
+        trigger_reasons = self._trigger_reasons(
+            step, key_vessel.risk, encounter_type, validation_targets
+        )
         triggered = bool(trigger_reasons)
 
         response = self.last_output
@@ -194,7 +206,7 @@ class RiskTriggeredLLMSupervisor:
             candidate_action = (
                 self.memory.last_executed_action
                 if self.enable_memory and self.memory.last_executed_action is not None
-                else self._default_safe_action(encounter_type)
+                else self._default_safe_action(validation_targets)
             )
             valid = self._validate_action(candidate_action, encounter_type, key_vessel.risk, validation_targets)
             final_action = self._finalize_action(
@@ -204,14 +216,13 @@ class RiskTriggeredLLMSupervisor:
                 valid,
                 validation_targets,
             )
-            final_valid = self._validate_action(final_action, encounter_type, key_vessel.risk, validation_targets)
             kdir = self._action_to_kdir(final_action)
             self._complete_trigger_event(
                 step,
                 triggered,
                 candidate_action,
                 final_action,
-                final_valid,
+                valid,
                 kdir,
                 key_index,
                 validation_targets,
@@ -220,7 +231,7 @@ class RiskTriggeredLLMSupervisor:
                 encounter_type=encounter_type,
                 candidate_action=candidate_action,
                 final_action=final_action,
-                valid=final_valid,
+                valid=valid,
                 response=response,
             )
             self.last_key_risk = key_vessel.risk
@@ -251,14 +262,13 @@ class RiskTriggeredLLMSupervisor:
             valid,
             validation_targets,
         )
-        final_valid = self._validate_action(final_action, encounter_type, key_vessel.risk, validation_targets)
         kdir = self._action_to_kdir(final_action)
         self._complete_trigger_event(
             step,
             triggered,
             candidate_action,
             final_action,
-            final_valid,
+            valid,
             kdir,
             key_index,
             validation_targets,
@@ -268,7 +278,7 @@ class RiskTriggeredLLMSupervisor:
             encounter_type=encounter_type,
             candidate_action=candidate_action,
             final_action=final_action,
-            valid=final_valid,
+            valid=valid,
             response=response,
         )
         self.last_key_risk = key_vessel.risk
@@ -347,10 +357,21 @@ class RiskTriggeredLLMSupervisor:
             if vessel.risk >= self.risk_threshold
         ]
 
-    def _trigger_reasons(self, step: int, key_risk: float, encounter_type: str) -> List[str]:
+    def _trigger_reasons(
+        self,
+        step: int,
+        key_risk: float,
+        encounter_type: str,
+        validation_targets: List[ValidationTarget],
+    ) -> List[str]:
         reasons: List[str] = []
         if self.trigger_mode == "always":
             return ["always"]
+
+        if self.trigger_mode == "high_level_always":
+            if self.last_decision_step is None or (step + 1) % self.high_level_update_steps == 0:
+                return ["high_level_update"]
+            return []
 
         if self.trigger_mode == "fixed":
             if self.last_call_step is None or step - self.last_call_step >= self.fixed_interval:
@@ -366,7 +387,15 @@ class RiskTriggeredLLMSupervisor:
             and self.last_decision_step is not None
         ):
             reasons.append("encounter_type_change")
-        if not self.memory.last_valid:
+        if self.last_decision_step is not None and (
+            not self.memory.last_valid
+            or not self._validate_action(
+                self.memory.last_executed_action,
+                encounter_type,
+                key_risk,
+                validation_targets,
+            )
+        ):
             reasons.append("previous_action_invalid")
         return reasons
 
@@ -378,17 +407,17 @@ class RiskTriggeredLLMSupervisor:
     ) -> Action:
         """Select the deterministic action used by Rule-trigger baseline."""
         if encounter_type in {"head_on", "crossing_give_way"}:
-            preferred = Action.STARBOARD
+            preferred = Action.AR
         elif encounter_type == "crossing_stand_on":
-            preferred = Action.STAND_ON
+            preferred = Action.A0
         else:
-            preferred = Action.STARBOARD if key_vessel.bearing >= 0 else Action.PORT
+            preferred = Action.AR if key_vessel.bearing >= 0 else Action.AL
 
         if self._validate_action(
             preferred, encounter_type, key_vessel.risk, validation_targets
         ):
             return preferred
-        return self._default_safe_action(encounter_type, validation_targets)
+        return self._default_safe_action(validation_targets)
 
     def _classify_encounter(
         self,
@@ -396,30 +425,9 @@ class RiskTriggeredLLMSupervisor:
         target_heading: Optional[float] = None,
         own_heading: Optional[float] = None,
     ) -> str:
-        """Classify an encounter using bearing and, when available, heading.
-
-        The paper's Case 7 describes TS1 as an overtaking vessel.  A bearing-only
-        classifier labels a same-course target directly ahead as head-on, so the
-        simulation supplies headings to disambiguate same-course overtaking from
-        an opposing head-on encounter.  Calls that do not provide headings keep
-        the historical bearing-only behavior used by the ablation tests.
-        """
         bearing_deg = float(np.degrees(np.arctan2(np.sin(bearing), np.cos(bearing))))
+        bearing_deg = round(bearing_deg, 12)
         abs_bearing = abs(bearing_deg)
-
-        if target_heading is not None and own_heading is not None:
-            relative_heading = float(
-                np.degrees(
-                    np.arctan2(
-                        np.sin(target_heading - own_heading),
-                        np.cos(target_heading - own_heading),
-                    )
-                )
-            )
-            if abs_bearing <= 30 and abs(relative_heading) <= 30:
-                return "overtaking"
-            if abs_bearing <= 6 and abs(relative_heading) >= 150:
-                return "head_on"
 
         if abs_bearing <= 6:
             return "head_on"
@@ -476,14 +484,15 @@ class RiskTriggeredLLMSupervisor:
             if "explanation:" in action_text:
                 action_text = action_text.split("explanation:", 1)[0]
 
-        if "continue current maneuver" in action_text or "continue current" in action_text:
-            return Action.CONTINUE
-        if "turn to starboard" in action_text or "turn starboard" in action_text or "starboard" in action_text:
-            return Action.STARBOARD
-        if "turn to port" in action_text or "turn port" in action_text:
-            return Action.PORT
-        if "stand on" in action_text or "no action" in action_text or "maintain course" in action_text:
-            return Action.STAND_ON
+        normalized = action_text.replace(" ", "").replace("-", "_")
+        if "a_c" in normalized:
+            return Action.AC
+        if "a_r" in normalized:
+            return Action.AR
+        if "a_l" in normalized:
+            return Action.AL
+        if "a_0" in normalized or "a0" in normalized:
+            return Action.A0
         return None
 
     def _validate_action(
@@ -497,7 +506,7 @@ class RiskTriggeredLLMSupervisor:
             return action is not None
         if action is None:
             return False
-        if action == Action.CONTINUE:
+        if action == Action.AC:
             if not self.enable_memory or self.memory.last_executed_action is None:
                 return False
             return self._validate_action(
@@ -511,20 +520,20 @@ class RiskTriggeredLLMSupervisor:
         if targets is None:
             targets = [ValidationTarget(index=-1, encounter_type=encounter_type, risk=key_risk)]
         if not targets:
-            return action in {Action.STAND_ON, Action.STARBOARD, Action.PORT}
+            return action in {Action.A0, Action.AR, Action.AL}
         return all(self._is_action_legal_for_target(action, target) for target in targets)
 
     def _is_action_legal_for_target(self, action: Action, target: ValidationTarget) -> bool:
         if target.risk < self.risk_threshold:
-            return action in {Action.STAND_ON, Action.STARBOARD, Action.PORT}
+            return action in {Action.A0, Action.AR, Action.AL}
         if target.encounter_type == "head_on":
-            return action == Action.STARBOARD
+            return action == Action.AR
         if target.encounter_type == "crossing_give_way":
-            return action == Action.STARBOARD
+            return action == Action.AR
         if target.encounter_type == "crossing_stand_on":
-            return action in {Action.STAND_ON, Action.STARBOARD}
+            return action in {Action.A0, Action.AR}
         if target.encounter_type == "overtaking":
-            return action in {Action.STARBOARD, Action.PORT}
+            return action in {Action.AR, Action.AL}
         return True
 
     def _finalize_action(
@@ -535,10 +544,10 @@ class RiskTriggeredLLMSupervisor:
         valid: bool,
         validation_targets: Optional[List[ValidationTarget]] = None,
     ) -> Action:
-        if valid and candidate_action == Action.CONTINUE:
+        if valid and candidate_action == Action.AC:
             if self.enable_memory and self.memory.last_executed_action is not None:
                 return self.memory.last_executed_action
-            return self._default_safe_action(encounter_type, validation_targets)
+            return self._default_safe_action(validation_targets)
         if valid and candidate_action is not None:
             return candidate_action
         if (
@@ -547,25 +556,22 @@ class RiskTriggeredLLMSupervisor:
             and self._validate_action(self.memory.last_executed_action, encounter_type, key_risk, validation_targets)
         ):
             return self.memory.last_executed_action
-        return self._default_safe_action(encounter_type, validation_targets)
+        return self._default_safe_action(validation_targets)
 
     def _default_safe_action(
         self,
-        encounter_type: str,
         validation_targets: Optional[List[ValidationTarget]] = None,
     ) -> Action:
-        if validation_targets:
-            for action in (Action.STARBOARD, Action.STAND_ON, Action.PORT):
-                if all(self._is_action_legal_for_target(action, target) for target in validation_targets):
-                    return action
-        if encounter_type in {"head_on", "crossing_give_way", "overtaking"}:
-            return Action.STARBOARD
-        return Action.STAND_ON
+        targets = validation_targets or []
+        for action in (Action.AR, Action.A0, Action.AL):
+            if all(self._is_action_legal_for_target(action, target) for target in targets):
+                return action
+        return Action.AR
 
     def _action_to_kdir(self, action: Action) -> int:
-        if action == Action.STARBOARD:
+        if action == Action.AR:
             return 1
-        if action == Action.PORT:
+        if action == Action.AL:
             return -1
         return 0
 
@@ -577,16 +583,16 @@ class RiskTriggeredLLMSupervisor:
         valid: bool,
         response: str,
     ) -> None:
-        if final_action == self.memory.last_executed_action and final_action != Action.STAND_ON:
+        if final_action == self.memory.last_executed_action and final_action != Action.A0:
             maneuver_steps = self.memory.maneuver_steps + 1
         else:
-            maneuver_steps = 1 if final_action != Action.STAND_ON else 0
+            maneuver_steps = 1 if final_action != Action.A0 else 0
 
         self.memory = ManeuverMemory(
             encounter_type=encounter_type,
             last_candidate_action=candidate_action,
             last_executed_action=final_action,
-            maneuver_active=final_action != Action.STAND_ON,
+            maneuver_active=final_action != Action.A0,
             maneuver_steps=maneuver_steps,
             last_valid=valid,
             last_response=response,

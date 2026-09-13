@@ -3,7 +3,9 @@ You are an assistant making a navigation decision for the own ship.
 Choose the most reasonable immediate action from the allowed action list using only the situation data. Do not rely on legal rule names or formal COLREG citations. Focus on practical collision avoidance and keep the explanation short.
 
 Respond in exactly this format:
-Action: [Stand on, no action / Give-way, turn to starboard / Give-way, turn to port / Continue current maneuver]
+Action: [a_0 / a_R / a_L / a_C]
 Explanation: <brief explanation>
+
+Use a_0 for stand on, a_R for a starboard turn, a_L for a port turn, and a_C for continuing the current maneuver.
 
 Situation:

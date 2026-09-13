@@ -1,5 +1,5 @@
 import os
-from src.config.paper_parameters import LLM_MAX_TOKENS, LLM_TEMPERATURE
+from src.config.paper_parameters import LLM_MAX_TOKENS, LLM_TEMPERATURE, PAPER_MODEL_BY_PROVIDER
 from dataclasses import dataclass
 from typing import List, Optional
 from abc import ABC, abstractmethod
@@ -110,7 +110,7 @@ class OtherProvider(LLMProvider):
         self.provider = ChatOpenAIProvider(
             provider_name=self.provider_name,
             api_key=os.getenv(f"{prefix}_API_KEY"),
-            model=os.getenv(f"{prefix}_MODEL", ""),
+            model=os.getenv(f"{prefix}_MODEL", PAPER_MODEL_BY_PROVIDER.get(self.provider_name, "")),
             temperature=float(os.getenv(f"{prefix}_TEMPERATURE", str(LLM_TEMPERATURE))),
             max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", str(LLM_MAX_TOKENS))),
             base_url=os.getenv(f"{prefix}_BASE_URL"),
@@ -140,7 +140,9 @@ class MultiLLMCOLREGSInterpreter:
     def _load_system_prompt(self) -> str:
         """Load system prompt from the unified offline prompt file."""
         default_prompt = """You are a ship navigation officer. Based on the situation, give a simple decision in this format:
-Action: [Stand on / Give-way, turn to starboard / Give-way, turn to port]
+Action: [a_0 / a_R / a_L / a_C]
+
+The action symbols are: a_0 = stand on, a_R = turn to starboard, a_L = turn to port, and a_C = continue the current maneuver.
 
 Situation:"""
 
@@ -205,7 +207,7 @@ Situation:"""
             )
 
         memory_block = f"\n{memory_context.strip()}\n" if memory_context else ""
-        prompt_ablation_variant = os.getenv("CORALL_PROMPT_ABLATION_VARIANT")
+        prompt_ablation_variant = os.getenv("RTRA_LLM_PROMPT_ABLATION_VARIANT")
         include_encounter_hint = prompt_ablation_variant is None
         encounter_block = (
             f"- Encounter type: {encounter_type}\n"

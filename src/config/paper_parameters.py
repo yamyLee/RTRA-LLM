@@ -9,6 +9,7 @@ mirrors these values for inspection and documentation.
 SIMULATION_TIME_S = 450.0
 SIMULATION_DT_S = 0.1
 RANDOM_SEED = 42
+PAPER_RANDOM_SEEDS = (42, 43, 44, 45, 46)
 
 # Own ship and target ships
 OWN_SHIP_LENGTH_M = 30.0
@@ -63,6 +64,19 @@ LLM_TEMPERATURE = 0.1
 LLM_MAX_TOKENS = 500
 LLM_RISK_THRESHOLD = 0.30
 LLM_FIXED_INTERVAL_STEPS = 250
+LLM_HIGH_LEVEL_UPDATE_STEPS = 20
+
+PAPER_MODEL_BY_PROVIDER = {
+    "qwen": "qwen3.5-plus",
+    "deepseek": "deepseek-v3.2",
+    "minimax": "MiniMax-M2.5",
+}
+
+PAPER_MODEL_DISPLAY_BY_PROVIDER = {
+    "qwen": "Qwen3.5-Plus",
+    "deepseek": "DeepSeek-V3.2",
+    "minimax": "MiniMax-M2.5",
+}
 
 # The manuscript specifies a shared low-level planner across compared methods.
 # VO is the named traditional baseline, so paper experiment runners use it for

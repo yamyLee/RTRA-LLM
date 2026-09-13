@@ -25,8 +25,8 @@ Time:  10.0s | Avg Risk: 0.789 | Kdir: 1.0
 ### LLM决策信息
 ```
 [LLM Decision at t=10.0s]
-[Claude] Rule 14 (head-on situation), Action: [Give-way, turn to starboard], Explanation: ...
-Action: Turn STARBOARD
+[Qwen3.5-Plus] Rule 14 (head-on situation), Action: [a_R], Explanation: ...
+Action: a_R
 ```
 
 ### 汇总信息

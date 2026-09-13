@@ -245,8 +245,8 @@ def plot_figure4(data: dict, metadata: dict, output_dir: Path) -> Path:
     action = data.get("control_kdir", data.get("kdir"))
     action_ax.step(time, action, where="post", color=COLORS["own"], lw=1.1)
     action_ax.set_yticks([-1, 0, 1])
-    action_ax.set_yticklabels(["port", "stand on", "starboard"], fontsize=7)
-    action_ax.set_ylabel("Action", fontsize=8)
+    action_ax.set_yticklabels([r"$a_L$", r"$a_0$", r"$a_R$"], fontsize=7)
+    action_ax.set_ylabel(r"$b(k)$", fontsize=8)
     action_ax.set_xlabel("Time (s)")
     action_ax.grid(True, axis="x", alpha=0.25)
     for event_idx, event in enumerate(events, start=1):

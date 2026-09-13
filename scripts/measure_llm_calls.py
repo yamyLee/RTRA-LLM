@@ -36,11 +36,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.config.paper_parameters import PAPER_LOW_LEVEL_PLANNER
+from src.config.paper_parameters import PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS
 from src.core.experiment_metrics import count_turn_events as _count_turn_events
 
 TRACE_ROWS: List[Dict[str, Any]] = []
@@ -127,6 +129,7 @@ def _install_tracer() -> None:
         elapsed = time.perf_counter() - started
         TRACE_ROWS.append({
             "case_number": CURRENT_CONTEXT.get("case_number"),
+            "seed": CURRENT_CONTEXT.get("seed"),
             "condition": CURRENT_CONTEXT.get("condition", ""),
             "provider": provider_self.provider_name,
             "model": getattr(provider_self, "model", ""),
@@ -162,11 +165,15 @@ def _mean(values: List[float]) -> Optional[float]:
 
 def _case_summary(
     case_number: int,
+    seed: int,
     run_elapsed_s: float,
     result: Dict[str, Any],
     configured_fixed_interval: int,
 ) -> Dict[str, Any]:
-    rows = [row for row in TRACE_ROWS if row.get("case_number") == case_number]
+    rows = [
+        row for row in TRACE_ROWS
+        if row.get("case_number") == case_number and row.get("seed") == seed
+    ]
 
     def values(name: str) -> List[float]:
         return [float(row[name]) for row in rows if row.get(name) is not None]
@@ -174,14 +181,15 @@ def _case_summary(
     input_tokens = values("input_tokens")
     output_tokens = values("output_tokens")
     total_tokens = values("total_tokens")
-    risk = [float(value) for value in result.get("risk", [])]
-    dcpa_m = [float(value) for value in result.get("dcpa", [])]
+    risk = np.asarray(result.get("risk", []), dtype=float).reshape(-1).tolist()
+    dcpa_m = np.asarray(result.get("dcpa", []), dtype=float).reshape(-1).tolist()
     kdir = [float(value) for value in result.get("kdir", [])]
     x_values = [float(value) for value in result.get("x", [])]
     y_values = [float(value) for value in result.get("y", [])]
 
     return {
         "case_number": case_number,
+        "seed": seed,
         "reported_llm_calls": result.get("llm_call_count", 0),
         "traced_llm_calls": len(rows),
         "failed_calls": sum(row.get("status") != "ok" for row in rows),
@@ -195,7 +203,7 @@ def _case_summary(
         "simulation_wall_time_s": round(run_elapsed_s, 6),
         "R_max": max(risk) if risk else None,
         "R_avg": _mean(risk),
-        "min_dcpa_nm": min(dcpa_m) / 1852.0 if dcpa_m else None,
+        "min_dcpa_nm": min(abs(value) for value in dcpa_m) / 1852.0 if dcpa_m else None,
         "total_turns": _count_turn_events(kdir),
         "final_dist_nm": (
             math.hypot(x_values[-1], y_values[-1]) / 1852.0
@@ -212,7 +220,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", required=True, help="Provider name, e.g. qwen or deepseek")
     parser.add_argument("--cases", nargs="+", type=int, required=True, help="Case numbers to run")
-    parser.add_argument("--trigger-mode", choices=("risk", "fixed", "always"), default="risk")
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(PAPER_RANDOM_SEEDS))
+    parser.add_argument("--trigger-mode", choices=("risk", "fixed", "always", "high_level_always"), default="risk")
     parser.add_argument("--risk-threshold", type=float, default=0.30)
     parser.add_argument("--fixed-interval", type=int, default=250)
     parser.add_argument("--sim-time", type=float, default=450.0)
@@ -256,44 +265,51 @@ def main() -> int:
 
     summaries: List[Dict[str, Any]] = []
     for case_number in args.cases:
-        CURRENT_CONTEXT.clear()
-        CURRENT_CONTEXT.update({
-            "case_number": case_number,
-            "condition": args.trigger_mode,
-        })
-        simulation_args = SimpleNamespace(
-            case_number=case_number,
-            all_cases=False,
-            sim_time=args.sim_time,
-            dt=args.dt,
-            no_animation=True,
-            output_dir=str(output_dir),
-            llm=1,
-            llm_provider=args.provider,
-            compare=False,
-            llm_trigger_mode=args.trigger_mode,
-            llm_risk_threshold=args.risk_threshold,
-            llm_fixed_interval=args.fixed_interval,
-            disable_memory=args.disable_memory,
-            disable_rule_validator=args.disable_rule_validator,
-            low_level_planner=PAPER_LOW_LEVEL_PLANNER,
-        )
+        for seed in args.seeds:
+            CURRENT_CONTEXT.clear()
+            CURRENT_CONTEXT.update({
+                "case_number": case_number,
+                "seed": seed,
+                "condition": args.trigger_mode,
+            })
+            simulation_args = SimpleNamespace(
+                case_number=case_number,
+                all_cases=False,
+                sim_time=args.sim_time,
+                dt=args.dt,
+                seed=seed,
+                no_animation=True,
+                output_dir=str(output_dir),
+                llm=1,
+                llm_provider=args.provider,
+                compare=False,
+                llm_trigger_mode=args.trigger_mode,
+                llm_risk_threshold=args.risk_threshold,
+                llm_fixed_interval=args.fixed_interval,
+                disable_memory=args.disable_memory,
+                disable_rule_validator=args.disable_rule_validator,
+                low_level_planner=PAPER_LOW_LEVEL_PLANNER,
+            )
 
-        started = time.perf_counter()
-        result = run_simulation(simulation_args, return_data=True)
-        elapsed = time.perf_counter() - started
-        summaries.append(_case_summary(case_number, elapsed, result, args.fixed_interval))
-        print(
-            f"case={case_number} reported_calls={result.get('llm_call_count', 0)} "
-            f"traced_calls={len([r for r in TRACE_ROWS if r.get('case_number') == case_number])} "
-            f"wall_time={elapsed:.2f}s"
-        )
+            started = time.perf_counter()
+            result = run_simulation(simulation_args, return_data=True)
+            elapsed = time.perf_counter() - started
+            summaries.append(_case_summary(case_number, seed, elapsed, result, args.fixed_interval))
+            traced_calls = len([
+                row for row in TRACE_ROWS
+                if row.get("case_number") == case_number and row.get("seed") == seed
+            ])
+            print(
+                f"case={case_number} seed={seed} reported_calls={result.get('llm_call_count', 0)} "
+                f"traced_calls={traced_calls} wall_time={elapsed:.2f}s"
+            )
 
     _write_csv(output_dir / "call_trace.csv", TRACE_ROWS)
     _write_csv(output_dir / "case_summary.csv", summaries)
     metadata = {
         "provider": args.provider,
         "cases": args.cases,
+        "seeds": args.seeds,
         "trigger_mode": args.trigger_mode,
         "risk_threshold": args.risk_threshold,
         "fixed_interval": args.fixed_interval,

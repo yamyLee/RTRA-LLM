@@ -49,7 +49,7 @@ fi
 
 # ── 打印运行信息 ──────────────────────────────────────────────────────────────
 echo "======================================================================"
-echo " CORALL MODULE ABLATION"
+echo " RTRA-LLM MODULE ABLATION"
 echo "======================================================================"
 echo " Provider    : $PROVIDER"
 echo " Smoke       : $SMOKE"
@@ -60,7 +60,7 @@ echo ""
 echo " 消融条件说明："
 echo "   0  baseline          无 LLM（纯反应式避碰，参考基准）"
 echo "   1  full              完整 RTRA-LLM"
-echo "   2  wo_risk_trigger   无风险触发（每步调用，≈ 现有LLM方法）"
+echo "   2  wo_risk_trigger   无风险触发（每次高层决策更新均调用）"
 echo "   3  wo_memory         无机动记忆"
 echo "   4  wo_validator      无规则验证器"
 echo "   5  wo_memory+val     同时关闭记忆+验证器"

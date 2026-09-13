@@ -48,8 +48,9 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
+from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
 from src.core.experiment_metrics import count_turn_events
+from src.core.paper_experiment_utils import add_scene_summary
 
 # ── 将项目根目录加到路径，使 src.* 可以直接导入 ──────────────────────────────
 _ROOT = Path(__file__).parent.resolve()
@@ -160,7 +161,7 @@ def _extract_metrics(results: Dict[str, Any], case_number: int, condition: Dict[
     avg_risk = _finite_mean(risk)
     positive_mask = risk > 0
     avg_positive_risk = _finite_mean(risk[positive_mask]) if positive_mask.any() else 0.0
-    min_dcpa_nm = float(np.min(results["dcpa"]) / 1852)
+    min_dcpa_nm = float(np.min(np.abs(results["dcpa"])) / 1852)
 
     llm_calls = int(results.get("llm_call_count", 0))
     trigger_events = int(len(results.get("llm_trigger_history", [])))
@@ -170,6 +171,7 @@ def _extract_metrics(results: Dict[str, Any], case_number: int, condition: Dict[
         "condition_name": condition["name"],
         "condition_label": condition["label"],
         "case_number": case_number,
+        "seed": int(results.get("random_seed", RANDOM_SEED)),
         "llm_provider": provider if condition["llm"] == 1 else "none",
         "llm_enabled": condition["llm"] == 1,
         "memory_enabled": not condition["disable_memory"],
@@ -261,13 +263,10 @@ def _build_summary_table(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "llm_enabled": group[0]["llm_enabled"],
             "memory_enabled": group[0]["memory_enabled"],
             "validator_enabled": group[0]["validator_enabled"],
-            "n_cases": len(group),
+            "n_cases": len({g["case_number"] for g in group}),
+            "n_seeds": len({g["seed"] for g in group}),
         }
-        for metric in NUMERIC_METRICS:
-            vals = [g[metric] for g in group if g.get(metric) is not None]
-            arr = np.array(vals, dtype=float)
-            row[f"{metric}_mean"] = float(np.mean(arr)) if arr.size > 0 else float("nan")
-            row[f"{metric}_std"] = float(np.std(arr)) if arr.size > 0 else float("nan")
+        add_scene_summary(row, group, NUMERIC_METRICS)
         summary_rows.append(row)
 
     # 按 condition_id 排序
@@ -317,9 +316,10 @@ def parse_args() -> argparse.Namespace:
                         help="每次仿真时长（秒），默认 450")
     parser.add_argument("--dt", type=float, default=SIMULATION_DT_S,
                         help="仿真时间步长（秒），默认 0.1")
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED,
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(PAPER_RANDOM_SEEDS),
                         help="动力学随机扰动种子")
-    parser.add_argument("--trigger_mode", choices=["risk", "fixed", "always"], default="risk",
+    parser.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--trigger_mode", choices=["risk", "fixed", "always", "high_level_always"], default="risk",
                         help="LLM 触发模式，默认 risk")
     parser.add_argument("--risk_threshold", type=float, default=LLM_RISK_THRESHOLD,
                         help="LLM 触发风险阈值，默认 0.30")
@@ -332,11 +332,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     cli = parse_args()
+    seeds = [cli.seed] if cli.seed is not None else list(cli.seeds)
 
     # ── 冒烟测试覆盖 ──
     if cli.smoke:
         cli.cases = [1]
         cli.sim_time = 30.0
+        seeds = seeds[:1]
         print("[SMOKE TEST] Running case 1 only, sim_time=30s")
 
     # ── 确定场景列表 ──
@@ -365,17 +367,18 @@ def main() -> None:
         llm_fixed_interval=250,
         sim_time=cli.sim_time,
         dt=cli.dt,
-        seed=cli.seed,
+        seed=seeds[0],
         output_dir=str(out_dir),
     )
 
     # ── 打印实验计划 ──
-    total_runs = len(conditions) * len(cases)
+    total_runs = len(conditions) * len(cases) * len(seeds)
     print("\n" + "=" * 70)
     print("RTRA-LLM ABLATION EXPERIMENT")
     print("=" * 70)
     print(f"Provider       : {provider_tag}")
     print(f"Cases          : {cases}")
+    print(f"Seeds          : {seeds}")
     print(f"Conditions     : {[c['name'] for c in conditions]}")
     print(f"Sim time       : {cli.sim_time}s  |  dt={cli.dt}s")
     print(f"Total runs     : {total_runs}")
@@ -394,24 +397,25 @@ def main() -> None:
         cond_rows: List[Dict[str, Any]] = []
 
         for case_number in cases:
-            run_idx += 1
-            progress = f"[{run_idx:3d}/{total_runs}]"
-            print(f"{progress} Case {case_number:2d} | {condition['name']} ...", end=" ", flush=True)
+            for seed in seeds:
+                base_args.seed = seed
+                run_idx += 1
+                progress = f"[{run_idx:3d}/{total_runs}]"
+                print(f"{progress} Case {case_number:2d} seed={seed} | {condition['name']} ...", end=" ", flush=True)
 
-            row = run_one(condition, case_number, base_args)
-            if row is not None:
-                all_rows.append(row)
-                cond_rows.append(row)
-                # 简洁打印关键指标
-                print(
-                    f"max_risk={row['max_risk']:.3f}  "
-                    f"avg_risk={row['avg_risk']:.3f}  "
-                    f"turns={row['total_turns']}  "
-                    f"llm_calls={row['llm_calls']}"
-                )
-            else:
-                failed_runs.append((condition["name"], case_number))
-                print("FAILED")
+                row = run_one(condition, case_number, base_args)
+                if row is not None:
+                    all_rows.append(row)
+                    cond_rows.append(row)
+                    print(
+                        f"max_risk={row['max_risk']:.3f}  "
+                        f"avg_risk={row['avg_risk']:.3f}  "
+                        f"turns={row['total_turns']}  "
+                        f"llm_calls={row['llm_calls']}"
+                    )
+                else:
+                    failed_runs.append((condition["name"], case_number, seed))
+                    print("FAILED")
 
         _write_csv(
             cond_rows,
@@ -436,12 +440,13 @@ def main() -> None:
                     "timestamp": ts,
                     "provider": provider_tag,
                     "cases": cases,
+                    "seeds": seeds,
                     "conditions": [c["name"] for c in conditions],
                     "sim_time": cli.sim_time,
                     "low_level_planner": PAPER_LOW_LEVEL_PLANNER,
                     "trigger_mode": cli.trigger_mode,
                     "risk_threshold": cli.risk_threshold,
-                    "failed_runs": [{"condition": c, "case": n} for c, n in failed_runs],
+                    "failed_runs": [{"condition": c, "case": n, "seed": s} for c, n, s in failed_runs],
                 },
                 "raw": all_rows,
                 "summary": summary_rows,
@@ -462,8 +467,8 @@ def main() -> None:
     print(f"  Successful     : {len(all_rows)}")
     print(f"  Failed         : {len(failed_runs)}")
     if failed_runs:
-        for cond_name, case_n in failed_runs:
-            print(f"    - condition={cond_name}, case={case_n}")
+        for cond_name, case_n, seed in failed_runs:
+            print(f"    - condition={cond_name}, case={case_n}, seed={seed}")
     print(f"  Output dir     : {out_dir}")
     print(f"    raw CSV      : {raw_csv_path.name}")
     print(f"    summary CSV  : {summary_csv_path.name}")

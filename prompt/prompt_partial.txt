@@ -4,7 +4,9 @@ First infer whether the encounter is likely head-on, crossing, or overtaking. Th
 
 Respond in exactly this format:
 Encounter: [head-on / crossing / overtaking / unclear]
-Action: [Stand on, no action / Give-way, turn to starboard / Give-way, turn to port / Continue current maneuver]
+Action: [a_0 / a_R / a_L / a_C]
 Explanation: <brief explanation>
+
+Use a_0 for stand on, a_R for a starboard turn, a_L for a port turn, and a_C for continuing the current maneuver.
 
 Situation:

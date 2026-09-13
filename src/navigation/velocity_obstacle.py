@@ -27,6 +27,15 @@ def _wrap_angle(angle: np.ndarray | float) -> np.ndarray | float:
     return (np.asarray(angle) + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def apply_direction_constraint(correction: float, kdir: int) -> float:
+    magnitude = max(abs(float(correction)), float(np.deg2rad(VO_HEADING_STEP_DEG)))
+    if kdir > 0:
+        return -magnitude
+    if kdir < 0:
+        return magnitude
+    return 0.0
+
+
 def velocity_obstacle_avoidance(
     x_ob,
     y_ob,
