@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
-from src.core.experiment_metrics import count_turn_events
+from src.core.experiment_metrics import count_turn_events, trajectory_metrics
 from src.core.paper_experiment_utils import add_scene_summary
 
 # ── 将项目根目录加到路径，使 src.* 可以直接导入 ──────────────────────────────
@@ -192,6 +192,8 @@ def _extract_metrics(results: Dict[str, Any], case_number: int, condition: Dict[
         # ── LLM 调用统计 ──
         "llm_calls": llm_calls,
         "trigger_events": trigger_events,
+        **trajectory_metrics(results),
+        "archive_path": results.get("archive_path", ""),
     }
 
 

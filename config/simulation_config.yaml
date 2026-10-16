@@ -111,6 +111,19 @@ llm:
   enable_memory: true
   enable_rule_validator: true
   prompt_path: "prompt/prompt.txt"
+
+# Sawada-style learning baseline. Full training/network settings are in
+# config/ppo_lstm.json; these values state the shared comparison contract.
+ppo_lstm:
+  method_level_reimplementation: true
+  config_path: "config/ppo_lstm.json"
+  policy_interval: 10.0       # s (100 integrations)
+  action_range_deg: [-10.0, 10.0]
+  safe_passing_distance: 0.5  # n mile
+  ozt_grid:
+    angular_resolution: 2.0   # deg
+    radial_resolution: 0.2    # n mile
+    sensor_radius: 12.0       # n mile
   
 # Output Configuration
 output:

@@ -43,6 +43,9 @@ setup(
             "sphinx>=4.0",
             "sphinx-rtd-theme>=1.0",
         ],
+        "rl": [
+            "torch>=2.1.0",
+        ],
     },
     entry_points={
         "console_scripts": [

@@ -1,126 +1,165 @@
-"""Two-dimensional velocity-obstacle baseline used by the paper experiments.
+"""Finite-horizon, constant-speed VO search with direction constraints.
 
-The baseline searches constant-speed candidate headings around the current
-heading. A candidate is rejected when the relative trajectory enters the
-specified safety radius within the finite prediction horizon. The returned
-correction keeps the same interface as the legacy local-avoidance module so it
-can be used by the existing simulation loop.
+Candidates can be checked with the nominal closed-loop vessel response.
+Neither prediction model is a robust safety certificate for stochastic motion.
 """
-
 from __future__ import annotations
 
+from dataclasses import dataclass
 import numpy as np
-
 from src.config.paper_parameters import (
-    OWN_SHIP_SPEED_MPS,
-    TARGET_SHIP_SPEED_MPS,
-    VO_HEADING_SEARCH_DEG,
-    VO_HEADING_STEP_DEG,
-    VO_SAFETY_RADIUS_M,
-    VO_TIME_HORIZON_S,
+    OWN_SHIP_SPEED_MPS, TARGET_SHIP_SPEED_MPS, VO_HEADING_SEARCH_DEG,
+    VO_HEADING_STEP_DEG, VO_SAFETY_RADIUS_M, VO_TIME_HORIZON_S,
 )
+from src.navigation.encounters import wrap_angle
 
 METERS_PER_NAUTICAL_MILE = 1852.0
 
 
-def _wrap_angle(angle: np.ndarray | float) -> np.ndarray | float:
-    return (np.asarray(angle) + np.pi) % (2.0 * np.pi) - np.pi
+@dataclass(frozen=True)
+class VOPlan:
+    heading: float
+    correction: float
+    predicted_clearance_m: float
+    prediction_safe: bool
+    direction_overridden: bool
+    status: str
+    prediction_model: str = "constant_heading"
+    evaluated_candidates: int = 0
 
 
 def apply_direction_constraint(correction: float, kdir: int) -> float:
+    """Legacy reactive-planner mapping; NEVER apply to a VO search result."""
     magnitude = max(abs(float(correction)), float(np.deg2rad(VO_HEADING_STEP_DEG)))
-    if kdir > 0:
-        return -magnitude
-    if kdir < 0:
-        return magnitude
-    return 0.0
+    return -magnitude if kdir > 0 else magnitude if kdir < 0 else 0.0
 
 
-def velocity_obstacle_avoidance(
-    x_ob,
-    y_ob,
-    x,
-    y,
-    psi,
-    v_ob=None,
-    psi_ob=None,
-    own_speed_mps: float = OWN_SHIP_SPEED_MPS,
-    safety_radius_m: float = VO_SAFETY_RADIUS_M,
-    horizon_s: float = VO_TIME_HORIZON_S,
-):
-    """Return a VO heading correction and legacy diagnostic arrays.
+def plan_velocity_obstacle(x_ob, y_ob, x, y, psi, v_ob=None, psi_ob=None,
+                           own_speed_mps=OWN_SHIP_SPEED_MPS,
+                           safety_radius_m=VO_SAFETY_RADIUS_M,
+                           horizon_s=VO_TIME_HORIZON_S, *,
+                           desired_heading=None, kdir=None, dynamics_state=None,
+                           controller_integral=0., response_dt_s=.5, response_transient_s=60.) -> VOPlan:
+    """Search absolute headings; positions are nmi, speeds m/s, headings rad.
 
-    Positions are in nautical miles and headings are in radians. Target
-    speeds are in m/s. If target velocities are omitted, the paper's common
-    target speed is used and targets are assumed to maintain heading zero.
+    kdir +1/-1 permits starboard/port or holding the present heading. kdir 0
+    requests holding heading; None follows desired_heading without a side limit.
+    If no safe constrained candidate exists, search all sides and explicitly
+    record the override. If none is safe, return maximum-clearance best effort
+    with prediction_safe=False; never label that fallback safe.
     """
-    x_ob = np.asarray(x_ob, dtype=float)
-    y_ob = np.asarray(y_ob, dtype=float)
-    n_targets = x_ob.size
-    if n_targets == 0:
-        empty = np.zeros(0, dtype=float)
-        return 0.0, empty, empty, empty, empty
-
-    if v_ob is None:
-        v_ob = np.full(n_targets, TARGET_SHIP_SPEED_MPS, dtype=float)
+    if kdir not in (None, -1, 0, 1):
+        raise ValueError('kdir must be None, -1, 0, or 1')
+    if not np.all(np.isfinite([horizon_s,safety_radius_m,own_speed_mps])) or horizon_s <= 0 or safety_radius_m <= 0 or own_speed_mps < 0:
+        raise ValueError('Invalid VO prediction parameters')
+    xo, yo = np.asarray(x_ob, float), np.asarray(y_ob, float)
+    n = xo.size
+    speeds = np.full(n, TARGET_SHIP_SPEED_MPS) if v_ob is None else np.asarray(v_ob, float)
+    headings = np.zeros(n) if psi_ob is None else np.asarray(psi_ob, float)
+    if not (xo.shape == yo.shape == speeds.shape == headings.shape) or xo.ndim != 1:
+        raise ValueError('Target arrays must be one-dimensional and have equal length')
+    if not all(np.all(np.isfinite(a)) for a in (xo, yo, speeds, headings, [x, y, psi, own_speed_mps])):
+        raise ValueError('VO inputs must be finite')
+    goal = float(psi if desired_heading is None else desired_heading)
+    if not np.isfinite(goal):
+        raise ValueError('desired_heading must be finite')
+    limit = np.deg2rad(VO_HEADING_SEARCH_DEG)
+    offsets = np.deg2rad(np.arange(-VO_HEADING_SEARCH_DEG,
+                                   VO_HEADING_SEARCH_DEG + VO_HEADING_STEP_DEG,
+                                   VO_HEADING_STEP_DEG))
+    offsets = np.unique(np.append(offsets, np.clip(wrap_angle(goal - psi), -limit, limit)))
+    candidates = psi + offsets
+    velocity = own_speed_mps * np.column_stack((np.cos(candidates), np.sin(candidates)))
+    clearance = np.full(len(candidates), np.inf)
+    for px, py, speed, heading in zip(xo, yo, speeds, headings):
+        position = METERS_PER_NAUTICAL_MILE * np.array([px - x, py - y])
+        rel_velocity = speed * np.array([np.cos(heading), np.sin(heading)]) - velocity
+        speed_sq = np.sum(rel_velocity ** 2, axis=1)
+        tcpa = np.divide(-np.sum(position * rel_velocity, axis=1), speed_sq,
+                         out=np.zeros(len(candidates)), where=speed_sq > 1e-12)
+        # Evaluate the entire closed time interval, including an initial
+        # intrusion, a diverging close vessel, and CPA beyond the horizon.
+        tcpa = np.clip(tcpa, 0.0, horizon_s)
+        distances = np.linalg.norm(position + rel_velocity * tcpa[:, None], axis=1)
+        clearance = np.minimum(clearance, distances)
+    safe = clearance > safety_radius_m
+    allowed = np.ones(len(offsets), dtype=bool)
+    if kdir == 1:
+        allowed = offsets <= 1e-12
+    elif kdir == -1:
+        allowed = offsets >= -1e-12
+    elif kdir == 0:
+        allowed = np.abs(offsets) <= 1e-12
+    model = 'constant_heading'
+    evaluated = len(candidates)
+    if dynamics_state is not None:
+        from src.navigation.response_prediction import response_clearance
+        model = 'nomoto_closed_loop'
+        goal_errors = np.abs(wrap_angle(candidates-goal))
+        order = np.lexsort((np.abs(offsets), goal_errors))
+        clearance = np.full(len(candidates), np.nan)
+        selected = None
+        evaluated = 0
+        status = 'safe'
+        target_positions = METERS_PER_NAUTICAL_MILE*np.column_stack((xo-x, yo-y))
+        # Predictor uses world positions, while this relative translation keeps
+        # small coordinates without changing headings or target velocities.
+        state = np.asarray(dynamics_state, float).copy()
+        if state.shape != (6,) or abs(float(wrap_angle(state[2]-psi))) > 1e-9:
+            raise ValueError('Dynamics state and VO heading must agree')
+        state[:2] = 0.
+        target_velocity = speeds[:, None]*np.column_stack((np.cos(headings),np.sin(headings)))
+        for phase in (True, False):
+            indices = order[allowed[order] == phase]
+            for start in range(0, len(indices), 8):
+                batch = indices[start:start+8]
+                clearance[batch] = response_clearance(candidates[batch], state, controller_integral,
+                    target_positions, target_velocity, own_speed_mps, horizon_s,
+                    response_dt_s, response_transient_s)
+                evaluated += len(batch)
+                feasible = batch[clearance[batch] > safety_radius_m]
+                if feasible.size:
+                    selected = int(feasible[0])
+                    status = 'safe' if phase else 'direction_override'
+                    break
+            if selected is not None:
+                break
+        if selected is None:
+            best = np.nanmax(clearance)
+            pool = np.flatnonzero(np.isclose(clearance,best,rtol=0,atol=1e-6))
+            if np.any(allowed[pool]):pool=pool[allowed[pool]]
+            errors = np.abs(wrap_angle(candidates[pool]-goal))
+            selected = int(pool[np.lexsort((np.abs(offsets[pool]),errors))[0]])
+            status = 'no_safe_heading'
+        safe = clearance > safety_radius_m
     else:
-        v_ob = np.asarray(v_ob, dtype=float)
-    if psi_ob is None:
-        psi_ob = np.zeros(n_targets, dtype=float)
-    else:
-        psi_ob = np.asarray(psi_ob, dtype=float)
+        pool = np.flatnonzero(safe & allowed)
+        status = 'safe'
+        if not pool.size:
+            pool = np.flatnonzero(safe)
+            status = 'direction_override'
+        if not pool.size:
+            best = np.max(clearance)
+            pool = np.flatnonzero(np.isclose(clearance,best,rtol=0,atol=1e-6))
+            if np.any(allowed[pool]):pool=pool[allowed[pool]]
+            status = 'no_safe_heading'
+        errors = np.abs(wrap_angle(candidates[pool]-goal))
+        selected = int(pool[np.lexsort((np.abs(offsets[pool]),errors))[0]])
+    return VOPlan(float(wrap_angle(candidates[selected])), float(offsets[selected]),
+                  float(clearance[selected]), bool(safe[selected]),
+                  bool(not allowed[selected]), status, model, evaluated)
 
-    relative_position = np.column_stack((x_ob - x, y_ob - y))
-    target_velocity = np.column_stack((
-        v_ob * np.cos(psi_ob) / METERS_PER_NAUTICAL_MILE,
-        v_ob * np.sin(psi_ob) / METERS_PER_NAUTICAL_MILE,
-    ))
-    candidate_offsets = np.deg2rad(
-        np.arange(-VO_HEADING_SEARCH_DEG,
-                  VO_HEADING_SEARCH_DEG + VO_HEADING_STEP_DEG,
-                  VO_HEADING_STEP_DEG)
-    )
-    candidate_headings = float(psi) + candidate_offsets
-    own_speed_nmi_s = own_speed_mps / METERS_PER_NAUTICAL_MILE
-    candidate_velocity = np.column_stack((
-        own_speed_nmi_s * np.cos(candidate_headings),
-        own_speed_nmi_s * np.sin(candidate_headings),
-    ))
 
-    safety_radius_nmi = safety_radius_m / METERS_PER_NAUTICAL_MILE
-    free = np.ones(candidate_headings.size, dtype=bool)
-    clearance = np.full(candidate_headings.size, np.inf, dtype=float)
-    for target_position, target_velocity in zip(relative_position, target_velocity):
-        relative_velocity = target_velocity[None, :] - candidate_velocity
-        speed_sq = np.sum(relative_velocity * relative_velocity, axis=1)
-        tcpa = np.divide(
-            -np.sum(target_position[None, :] * relative_velocity, axis=1),
-            speed_sq,
-            out=np.full(candidate_headings.size, np.inf),
-            where=speed_sq > 1e-12,
-        )
-        tcpa_clip = np.clip(tcpa, 0.0, horizon_s)
-        closest_vector = target_position[None, :] + relative_velocity * tcpa_clip[:, None]
-        dcpa = np.linalg.norm(closest_vector, axis=1)
-        collision = (tcpa >= 0.0) & (tcpa <= horizon_s) & (dcpa <= safety_radius_nmi)
-        free &= ~collision
-        clearance = np.minimum(clearance, dcpa)
-
-    if np.any(free):
-        scores = np.abs(candidate_offsets)
-        scores[~free] = np.inf
-        selected = int(np.argmin(scores))
-    else:
-        # If every candidate intersects a VO, select the heading with the
-        # greatest predicted clearance and then the smallest deviation.
-        best_clearance = np.max(clearance)
-        candidates = np.flatnonzero(np.isclose(clearance, best_clearance))
-        selected = int(candidates[np.argmin(np.abs(candidate_offsets[candidates]))])
-
-    correction = float(_wrap_angle(candidate_headings[selected] - float(psi)))
-    line_of_sight = np.arctan2(y_ob - y, x_ob - x)
-    bearing_ob = float(psi) - line_of_sight
-    distance_ob = np.sqrt((x_ob - x) ** 2 + (y_ob - y) ** 2)
-    w_r = (distance_ob <= safety_radius_nmi).astype(float)
-    w_b = -np.cos(bearing_ob)
-    return correction, w_b, w_r, distance_ob, bearing_ob
+def velocity_obstacle_avoidance(x_ob, y_ob, x, y, psi, v_ob=None, psi_ob=None,
+                               own_speed_mps=OWN_SHIP_SPEED_MPS,
+                               safety_radius_m=VO_SAFETY_RADIUS_M,
+                               horizon_s=VO_TIME_HORIZON_S, **kwargs):
+    """Compatibility API: correction is relative to CURRENT heading."""
+    plan = plan_velocity_obstacle(x_ob, y_ob, x, y, psi, v_ob, psi_ob,
+                                 own_speed_mps, safety_radius_m, horizon_s, **kwargs)
+    xo, yo = np.asarray(x_ob, float), np.asarray(y_ob, float)
+    bearing = wrap_angle(psi - np.arctan2(yo - y, xo - x))
+    distance = np.hypot(xo - x, yo - y)
+    return (plan.correction, -np.cos(bearing),
+            (distance <= safety_radius_m / METERS_PER_NAUTICAL_MILE).astype(float),
+            distance, bearing)

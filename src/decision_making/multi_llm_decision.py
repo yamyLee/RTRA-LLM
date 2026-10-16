@@ -1,4 +1,5 @@
 import os
+import math
 from src.config.paper_parameters import LLM_MAX_TOKENS, LLM_TEMPERATURE, PAPER_MODEL_BY_PROVIDER
 from dataclasses import dataclass
 from typing import List, Optional
@@ -19,6 +20,7 @@ class VesselState:
     dcpa: float
     tcpa: float
     heading: Optional[float] = None
+    speed: Optional[float] = None
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers"""
@@ -71,13 +73,20 @@ class ChatOpenAIProvider(LLMProvider):
 
     def generate_response(self, prompt: str) -> str:
         """Generate response through an OpenAI-compatible client."""
+        self.last_usage_metadata = {}
+        self.last_call_ok = False
+        self.last_call_error = None
         if not self.client:
+            self.last_call_error = "provider_unavailable"
             return f"{self.provider_name} not available"
 
         try:
             response = self.client.invoke(prompt)
+            self.last_usage_metadata = getattr(response, "usage_metadata", None) or {}
+            self.last_call_ok = True
             return response.content
         except Exception as e:
+            self.last_call_error = str(e)
             return f"{self.provider_name} error: {str(e)}"
 
 
@@ -179,6 +188,8 @@ Situation:"""
         memory_context: Optional[str] = None,
         encounter_type: Optional[str] = None,
         key_vessel_index: Optional[int] = None,
+        own_heading: Optional[float] = None,
+        own_speed: Optional[float] = None,
     ) -> str:
         """Format situation description for LLM"""
         if not vessels:
@@ -200,10 +211,14 @@ Situation:"""
         for idx, vessel in enumerate(vessels, start=1):
             marker = " (key target)" if idx - 1 == key_vessel_index else ""
             bearing_deg = self._format_bearing_degrees(vessel.bearing)
+            heading_text = (f", absolute target heading={math.degrees(vessel.heading) % 360:.1f} deg"
+                            if vessel.heading is not None else "")
+            if vessel.speed is not None:
+                heading_text += f", target speed={vessel.speed:.3f} m/s"
             vessel_lines.append(
                 f"- Target vessel {idx}{marker}: q={vessel.risk:.3f}, "
                 f"R={vessel.distance:.2f} nmi, relative bearing={bearing_deg:.1f} deg, "
-                f"d_CPA={vessel.dcpa:.2f} nmi, t_CPA={vessel.tcpa:.1f} s"
+                f"d_CPA={vessel.dcpa:.2f} nmi, t_CPA={vessel.tcpa:.1f} s{heading_text}"
             )
 
         memory_block = f"\n{memory_context.strip()}\n" if memory_context else ""
@@ -215,8 +230,15 @@ Situation:"""
             else ""
         )
 
+        own_state = ""
+        if own_heading is not None:
+            own_state += f"Own heading={math.degrees(own_heading) % 360:.1f} deg. "
+        if own_speed is not None:
+            own_state += f"Own speed={own_speed:.3f} m/s."
         description = f"""
 Maritime Situation Analysis:
+Relative bearing: positive is starboard, negative is port. Absolute headings: counterclockwise from east.
+{own_state}
 - Number of vessels: {len(vessels)}
 - Key target vessel: {key_vessel_index + 1}
 {encounter_block}- Key target timing: {time_status}
@@ -236,6 +258,8 @@ What action should the own ship take next?"""
         memory_context: Optional[str] = None,
         encounter_type: Optional[str] = None,
         key_vessel_index: Optional[int] = None,
+        own_heading: Optional[float] = None,
+        own_speed: Optional[float] = None,
     ) -> str:
         """Make a COLREGs-compliant decision"""
         if not self.provider:
@@ -250,6 +274,7 @@ What action should the own ship take next?"""
             memory_context=memory_context,
             encounter_type=encounter_type,
             key_vessel_index=key_vessel_index,
+            own_heading=own_heading, own_speed=own_speed,
         )
 
         # Create full prompt
@@ -260,6 +285,8 @@ What action should the own ship take next?"""
             print("=" * 60)
             print(full_prompt)
             print("=" * 60)
+
+        self.last_prompt = full_prompt
 
         # Get response from LLM
         response = self.provider.generate_response(full_prompt)

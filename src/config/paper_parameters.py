@@ -11,6 +11,10 @@ SIMULATION_DT_S = 0.1
 RANDOM_SEED = 42
 PAPER_RANDOM_SEEDS = (42, 43, 44, 45, 46)
 
+# Inherited numerical benchmark settings from Klins101/CORALL (not a validated
+# vessel specification).
+# The inherited kinematics advance at commanded speed u_c; the lagged u state
+# is not used for translation. Do not reinterpret these m/s values as knots.
 # Own ship and target ships
 OWN_SHIP_LENGTH_M = 30.0
 OWN_SHIP_BEAM_M = 16.0
@@ -29,8 +33,9 @@ AVOIDANCE_DISTANCE_OUTER_M = 1200.0
 AVOIDANCE_BEARING_SIGMA_DEG = 80.0
 AVOIDANCE_HEADING_GAIN = 2.0
 
-# Traditional VO baseline.  The paper does not specify a separate VO horizon;
-# use the upper TCPA risk horizon and the inner local-avoidance safety domain.
+# VO settings added for this comparison. 600 m is inherited from the original
+# reactive planner's inner distance parameter, not a physical collision boundary.
+# Constant-heading feasibility does not certify the finite-rate closed-loop path.
 VO_TIME_HORIZON_S = 360.0
 VO_SAFETY_RADIUS_M = 600.0
 VO_HEADING_SEARCH_DEG = 90.0

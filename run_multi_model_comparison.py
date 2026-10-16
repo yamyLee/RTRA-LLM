@@ -16,7 +16,7 @@
   - R_max  : 场景内最大碰撞风险（越低越好）
   - R_avg  : 场景内平均碰撞风险（越低越好）
   - A_turn : LLM与论文 VO 基准的转向一致率（越高越好）
-  - ΔD     : 路径效率偏差（相对基准，越小越好）
+  - ΔD     : 实际航程相对VO的偏差（需结合进度和偏航评价）
   - N_call : LLM调用次数/场景（越少越好）
 
 用法
@@ -60,6 +60,7 @@ from src.config.paper_parameters import (
 )
 from src.core.experiment_metrics import count_turn_events
 from src.core.paper_experiment_utils import add_scene_summary
+from src.core.experiment_metrics import trajectory_metrics
 
 # ── 项目根目录 ────────────────────────────────────────────────────────────────
 _ROOT = Path(__file__).parent.resolve()
@@ -124,11 +125,6 @@ def _compute_aturn(llm_kdir: np.ndarray, baseline_kdir: np.ndarray) -> float:
     return round(agree / total * 100, 2)
 
 
-def _compute_delta_d(llm_final_dist_m: float, baseline_final_dist_m: float) -> float:
-    """计算路径效率偏差 ΔD（%）= (LLM - baseline) / baseline × 100。"""
-    if abs(baseline_final_dist_m) < 1e-6:
-        return 0.0
-    return round((llm_final_dist_m - baseline_final_dist_m) / baseline_final_dist_m * 100, 3)
 
 
 def _extract_metrics(
@@ -166,15 +162,6 @@ def _extract_metrics(
         "case_number": case_number,
         "seed": int(results.get("random_seed", RANDOM_SEED)),
         "model": results.get("llm_model", ""),
-        # 安全指标
-        "R_max": float(np.max(risk)),
-        "R_avg": _finite_mean(risk),
-        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
-        # 机动一致性
-        "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
-        # 路径效率
-        "delta_D_pct": _compute_delta_d(llm_dist_m, baseline_dist_m),
-        "final_dist_nm": llm_dist_m * METERS_TO_NMI,
         "baseline_dist_nm": baseline_dist_m * METERS_TO_NMI,
         # LLM 调用
         "N_call": int(results.get("llm_call_count", 0)),
@@ -183,7 +170,11 @@ def _extract_metrics(
         "trigger_mode": results.get("llm_trigger_mode", "risk"),
         "fixed_interval": results.get("llm_fixed_interval", 0),
         "risk_threshold": results.get("llm_risk_threshold", LLM_RISK_THRESHOLD),
-        "total_turns": count_turn_events(llm_kdir),
+        # One schema shared with VO and PPO-LSTM.
+        **trajectory_metrics(results, baseline_results),
+        "archive_path": results.get("archive_path", ""),
+        "output_parse_failure_pct": results.get("output_parse_failure_pct", float("nan")),
+        "execution_rule_violation_pct": results.get("execution_rule_violation_pct", float("nan")),
     }
 
 
@@ -266,7 +257,7 @@ def _write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(key for row in rows for key in row)))
         writer.writeheader()
         writer.writerows(rows)
     print(f"  -> Saved {len(rows)} rows to {path}")
@@ -275,6 +266,10 @@ def _write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
 # ── 汇总统计（按 provider 聚合，跨 case 均值±std）────────────────────────────
 
 NUMERIC_METRICS = [
+    "min_actual_separation_nm", "safety_domain_intrusion_count",
+    "safety_domain_intrusion_duration_s", "collision", "path_length_m",
+    "max_cross_track_m", "route_progress_m", "reverse_switches",
+    "output_parse_failure_pct", "execution_rule_violation_pct",
     "R_max", "R_avg", "min_dcpa_nm", "A_turn_pct",
     "delta_D_pct", "final_dist_nm", "N_call", "trigger_events", "total_turns",
 ]
@@ -550,6 +545,10 @@ def main() -> None:
             "fixed_interval": 0,
             "risk_threshold": 0.0,
             "total_turns": count_turn_events(kdir),
+            **trajectory_metrics(br, br),
+            "archive_path": br.get("archive_path", ""),
+            "output_parse_failure_pct": float("nan"),
+            "execution_rule_violation_pct": br.get("execution_rule_violation_pct", float("nan")),
         })
     all_rows_with_baseline = baseline_rows + all_rows
     _write_csv(all_rows_with_baseline, out_dir / "multi_model_all_raw.csv")

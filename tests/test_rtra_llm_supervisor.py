@@ -1,477 +1,184 @@
 import math
 import unittest
-
 from src.decision_making.rtra_llm_supervisor import Action, RiskTriggeredLLMSupervisor
-from src.core.experiment_metrics import count_turn_events
+from src.navigation.encounters import classify_encounter
+from src.core.experiment_metrics import count_turn_events, count_reverse_switches
 from src.core.paper_experiment_utils import scene_level_values
-from src.navigation.velocity_obstacle import apply_direction_constraint
 
 
 class FakeProvider:
     def __init__(self, response):
-        self.response = response
-        self.calls = 0
+        self.response, self.calls = response, 0
 
     def generate_response(self, prompt):
         self.calls += 1
         return self.response
 
 
-def make_supervisor(response, risk_threshold=0.30):
-    supervisor = RiskTriggeredLLMSupervisor(provider="fake", risk_threshold=risk_threshold)
-    fake_provider = FakeProvider(response)
-    supervisor.interpreter.provider = fake_provider
-    return supervisor, fake_provider
+def make_supervisor(response='Action: a_R', **kwargs):
+    supervisor = RiskTriggeredLLMSupervisor(provider='fake', **kwargs)
+    provider = FakeProvider(response)
+    supervisor.interpreter.provider = provider
+    return supervisor, provider
+
+
+def state(**updates):
+    value = dict(risk=[0.5], distance=[1.0], bearing=[0.0], dcpa=[0.1], tcpa=[100.0],
+                 target_heading=[math.pi], own_heading=0.0)
+    value.update(updates)
+    return value
 
 
 class RiskTriggeredLLMSupervisorTest(unittest.TestCase):
-    def test_paper_action_symbols_are_parsed(self):
-        supervisor, _ = make_supervisor("Action: a_0")
-        self.assertEqual(supervisor.parse_action("Action: a_0"), Action.A0)
-        self.assertEqual(supervisor.parse_action("Action: a_R"), Action.AR)
-        self.assertEqual(supervisor.parse_action("Action: a_L"), Action.AL)
-        self.assertEqual(supervisor.parse_action("Action: a_C"), Action.AC)
+    def test_forward_slow_target_is_overtaking_not_head_on(self):
+        self.assertEqual(classify_encounter(0, 0, 0, 43.3, 18.52), 'overtaking')
+        self.assertEqual(classify_encounter(0, math.pi, 0, 43.3, 18.52), 'head_on')
 
-    def test_direction_constraint_maps_actions_to_physical_turn_direction(self):
-        self.assertLess(apply_direction_constraint(0.2, 1), 0.0)
-        self.assertLess(apply_direction_constraint(-0.2, 1), 0.0)
-        self.assertGreater(apply_direction_constraint(0.2, -1), 0.0)
-        self.assertGreater(apply_direction_constraint(-0.2, -1), 0.0)
-        self.assertLess(apply_direction_constraint(0.0, 1), 0.0)
-        self.assertGreater(apply_direction_constraint(0.0, -1), 0.0)
-        self.assertEqual(apply_direction_constraint(0.2, 0), 0.0)
+    def test_target_approaching_from_astern_is_being_overtaken(self):
+        self.assertEqual(classify_encounter(math.pi, 0, 0, 10, 20), 'being_overtaken')
+        self.assertEqual(classify_encounter(math.pi, 0, 0, 20, 10), 'none')
 
-    def test_without_risk_trigger_calls_at_226_high_level_updates(self):
-        supervisor, provider = make_supervisor("Action: a_R")
-        supervisor.trigger_mode = "high_level_always"
-        supervisor.high_level_update_steps = 20
-        for step in range(4500):
-            supervisor.update([0.1], [1.0], [0.0], [0.2], [100.0], step=step)
-        self.assertEqual(provider.calls, 226)
-        self.assertEqual(supervisor.call_count, 226)
+    def test_missing_headings_do_not_claim_a_colregs_encounter(self):
+        self.assertEqual(classify_encounter(0, None, 0, 10, 10), 'unknown')
 
-    def test_fixed_intervals_match_the_paper_call_counts(self):
-        for interval, expected in ((100, 45), (250, 18), (500, 9), (750, 6)):
-            with self.subTest(interval=interval):
-                supervisor, provider = make_supervisor("Action: a_R")
-                supervisor.trigger_mode = "fixed"
-                supervisor.fixed_interval = interval
-                for step in range(4500):
-                    supervisor.update([0.1], [1.0], [0.0], [0.2], [100.0], step=step)
-                self.assertEqual(provider.calls, expected)
+    def test_crossing_responsibility_uses_starboard_bearing(self):
+        self.assertEqual(classify_encounter(math.pi / 4, math.pi / 2, 0, 20, 20), 'crossing_give_way')
+        self.assertEqual(classify_encounter(-math.pi / 4, -math.pi / 2, 0, 20, 20), 'crossing_stand_on')
 
-    def test_experiment_statistics_average_seeds_before_scenes(self):
-        rows = [
-            {"case_number": 1, "seed": 42, "R_avg": 1.0},
-            {"case_number": 1, "seed": 43, "R_avg": 3.0},
-            {"case_number": 2, "seed": 42, "R_avg": 10.0},
-            {"case_number": 2, "seed": 43, "R_avg": 14.0},
-        ]
-        self.assertEqual(scene_level_values(rows, "R_avg").tolist(), [2.0, 12.0])
+    def test_symmetric_geometry_after_heading_rotation_has_same_role(self):
+        for rotation in (0, 1.2, -2, 6.28):
+            self.assertEqual(classify_encounter(0, rotation, rotation, 20, 10), 'overtaking')
 
-    def test_turn_metric_counts_events_not_active_samples(self):
-        self.assertEqual(count_turn_events([0, 1, 1, 1, 0, -1, -1, 0]), 2)
+    def test_ambiguous_output_is_rejected(self):
+        supervisor, _ = make_supervisor()
+        for symbol, expected in [('a_R', Action.AR), ('a_L', Action.AL), ('a_C', Action.AC), ('a_0', Action.A0)]:
+            self.assertEqual(supervisor.parse_action('Action: ' + symbol), expected)
+        self.assertIsNone(supervisor.parse_action('Action: a_R or a_L'))
+        self.assertIsNone(supervisor.parse_action('Action: unclear'))
+        self.assertEqual(supervisor.parse_action('Action: a_R, Explanation: do not use a_L'), Action.AR)
 
-    def test_first_decision_is_an_initial_trigger(self):
-        supervisor, provider = make_supervisor(
-            "Rule 14 (head-on), Action: a_R, Explanation: safe."
-        )
+    def test_head_on_port_is_rejected_and_fallback_is_right(self):
+        supervisor, _ = make_supervisor('Action: a_L')
+        result = supervisor.update(step=0, **state())
+        self.assertFalse(result.valid)
+        self.assertEqual(result.final_action, Action.AR)
 
-        result = supervisor.update(
-            risk=[0.1],
-            distance=[3.0],
-            bearing=[0.0],
-            dcpa=[1.0],
-            tcpa=[500.0],
-            step=1,
-        )
-
-        self.assertTrue(result.triggered)
-        self.assertIn("initial_trigger", result.trigger_reasons)
-        self.assertEqual(provider.calls, 1)
-
-    def test_paper_bearing_classifier_is_used_with_headings(self):
-        supervisor, _ = make_supervisor("Action: a_R")
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[3.0],
-            bearing=[0.0],
-            dcpa=[1.0],
-            tcpa=[500.0],
-            step=1,
-            target_heading=[0.0],
-            own_heading=0.0,
-        )
-        self.assertEqual(result.encounter_type, "head_on")
-        self.assertEqual(result.validation_encounter_types, ["head_on"])
-
-    def test_paper_bearing_intervals_include_the_specified_boundaries(self):
-        supervisor, _ = make_supervisor("Action: a_0")
-        cases = [
-            (-180, "overtaking"),
-            (-118.001, "overtaking"),
-            (-118, "crossing_stand_on"),
-            (-118 - 1e-9, "overtaking"),
-            (-118 + 1e-9, "crossing_stand_on"),
-            (-6.001, "crossing_stand_on"),
-            (-6, "head_on"),
-            (-6 - 1e-9, "crossing_stand_on"),
-            (0, "head_on"),
-            (6, "head_on"),
-            (6 + 1e-9, "crossing_give_way"),
-            (6.001, "crossing_give_way"),
-            (112, "crossing_give_way"),
-            (112 + 1e-9, "overtaking"),
-            (112.001, "overtaking"),
-            (180, "overtaking"),
-            (360, "head_on"),
-            (390, "crossing_give_way"),
-        ]
-        for degrees, expected in cases:
-            with self.subTest(degrees=degrees):
-                self.assertEqual(supervisor._classify_encounter(math.radians(degrees)), expected)
-
-    def test_secondary_target_invalidates_previous_action_before_model_call(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        first = supervisor.update(risk=[0.8, 0.29], step=1, **state)
-        self.assertEqual(first.final_action, Action.A0)
-        self.assertTrue(supervisor.memory.last_valid)
-
-        provider.response = "Action: a_R"
-        second = supervisor.update(risk=[0.8, 0.3], step=2, **state)
-        self.assertEqual(second.key_vessel_index, first.key_vessel_index)
-        self.assertEqual(second.encounter_type, first.encounter_type)
-        self.assertEqual(second.key_risk, first.key_risk)
-        self.assertEqual(second.trigger_reasons, ["previous_action_invalid"])
-        self.assertEqual(second.final_action, Action.AR)
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(supervisor.trigger_history[-1]["reasons"], ["previous_action_invalid"])
-
-        third = supervisor.update(risk=[0.8, 0.3], step=3, **state)
-        self.assertFalse(third.triggered)
-        self.assertEqual(provider.calls, 2)
-
-    def test_secondary_encounter_change_triggers_without_risk_crossing(self):
-        supervisor, provider = make_supervisor("Action: a_L")
-        state = dict(risk=[0.8, 0.5], distance=[1.0, 1.1],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        first = supervisor.update(bearing=[3.0, 3.0], step=1, **state)
-        self.assertEqual(first.final_action, Action.AL)
-        provider.response = "Action: a_C"
-        second = supervisor.update(bearing=[3.0, 0.0], step=2, **state)
-        self.assertEqual(second.trigger_reasons, ["previous_action_invalid"])
-        self.assertEqual(provider.calls, 2)
-        self.assertFalse(second.valid)
-        self.assertEqual(second.final_action, Action.AR)
-
-    def test_new_high_risk_target_does_not_trigger_if_previous_action_stays_legal(self):
-        supervisor, provider = make_supervisor("Action: a_R")
-        state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        supervisor.update(risk=[0.8, 0.29], step=1, **state)
-        second = supervisor.update(risk=[0.8, 0.3], step=2, **state)
-        self.assertFalse(second.triggered)
-        self.assertEqual(provider.calls, 1)
-
-    def test_secondary_target_below_threshold_does_not_invalidate_previous_action(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        supervisor.update(risk=[0.8, 0.1], step=1, **state)
-        second = supervisor.update(risk=[0.8, 0.29], step=2, **state)
-        self.assertFalse(second.triggered)
-        self.assertEqual(second.final_action, Action.A0)
-        self.assertEqual(provider.calls, 1)
-
-    def test_action_invalidation_preserves_fixed_and_always_call_schedules(self):
-        for mode, expected_reasons, calls in [
-            ("fixed", [], 1), ("always", ["always"], 2),
-        ]:
-            with self.subTest(mode=mode):
-                supervisor, provider = make_supervisor("Action: a_0")
-                supervisor.trigger_mode = mode
-                supervisor.fixed_interval = 10
-                state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                             dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-                supervisor.update(risk=[0.8, 0.29], step=1, **state)
-                second = supervisor.update(risk=[0.8, 0.3], step=2, **state)
-                self.assertEqual(second.trigger_reasons, expected_reasons)
-                self.assertEqual(provider.calls, calls)
-                self.assertEqual(second.final_action, Action.AR)
-
-    def test_disabled_validator_does_not_add_rule_invalidation_trigger(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        supervisor.enable_validator = False
-        state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        supervisor.update(risk=[0.8, 0.29], step=1, **state)
-        second = supervisor.update(risk=[0.8, 0.3], step=2, **state)
-        self.assertFalse(second.triggered)
-        self.assertEqual(second.final_action, Action.A0)
-        self.assertEqual(provider.calls, 1)
-
-    def test_no_targets_does_not_consume_initial_trigger(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        empty = supervisor.update([], [], [], [], [], step=0)
-        self.assertFalse(empty.triggered)
-        self.assertIsNone(supervisor.last_decision_step)
-        first = supervisor.update([0.1], [1.0], [-0.5], [0.2], [100.0], step=1)
-        self.assertEqual(first.trigger_reasons, ["initial_trigger"])
-        self.assertEqual(provider.calls, 1)
-
-    def test_equation_17_fallback_is_starboard_without_high_risk_targets(self):
-        for response in ("Action: unclear", "Action: a_C"):
-            with self.subTest(response=response):
-                supervisor, _ = make_supervisor(response)
-                result = supervisor.update([0.1], [1.0], [-0.5], [0.2], [100.0], step=1)
-                self.assertEqual(result.encounter_type, "crossing_stand_on")
-                self.assertEqual(result.high_risk_vessel_indices, [])
-                self.assertFalse(result.valid)
-                self.assertEqual(result.final_action, Action.AR)
-
-    def test_legal_previous_action_takes_precedence_over_fallback(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        supervisor.update([0.1], [1.0], [-0.5], [0.2], [100.0], step=1)
-        provider.response = "Action: unclear"
-        result = supervisor.update([0.3], [1.0], [-0.5], [0.2], [100.0], step=2)
+    def test_stand_on_ship_holds_course_outside_emergency_proxy(self):
+        supervisor, _ = make_supervisor('Action: a_R')
+        result = supervisor.update(step=0, **state(bearing=[-math.pi / 4], target_heading=[-math.pi / 2]))
+        self.assertEqual(result.encounter_type, 'crossing_stand_on')
         self.assertFalse(result.valid)
         self.assertEqual(result.final_action, Action.A0)
-        self.assertEqual(provider.calls, 2)
 
-    def test_continue_resolves_to_the_legal_previous_action(self):
-        supervisor, provider = make_supervisor("Action: a_0")
-        supervisor.update([0.1], [1.0], [-0.5], [0.2], [100.0], step=1)
-        provider.response = "Action: a_C"
-        result = supervisor.update([0.3], [1.0], [-0.5], [0.2], [100.0], step=2)
+    def test_stand_on_ship_can_take_right_action_in_explicit_emergency(self):
+        supervisor, _ = make_supervisor('Action: a_R')
+        result = supervisor.update(step=0, **state(bearing=[-math.pi / 4], target_heading=[-math.pi / 2], tcpa=[20]))
         self.assertTrue(result.valid)
+        self.assertEqual(result.final_action, Action.AR)
+
+    def test_conflicting_multi_target_rules_are_explicit(self):
+        supervisor, _ = make_supervisor()
+        result = supervisor.update(step=0, risk=[.5, .5], distance=[1, 1], bearing=[0, -math.pi/4],
+            dcpa=[.1, .1], tcpa=[100, 100], target_heading=[math.pi, -math.pi/2], own_heading=0)
+        self.assertTrue(result.rule_conflict)
+        self.assertFalse(result.valid)
+        self.assertEqual(supervisor.trigger_history[-1]['rule_conflict'], True)
+
+    def test_overtaking_responsibility_persists_during_maneuver(self):
+        supervisor, _ = make_supervisor()
+        supervisor.update(step=0, **state(target_heading=[0]))
+        second = supervisor.update(step=1, **state(bearing=[.6], target_heading=[0], own_heading=-.6))
+        self.assertEqual(second.encounter_type, 'overtaking')
+        passed = supervisor.update(step=2, **state(bearing=[math.pi], target_heading=[0], tcpa=[-20], risk=[.1]))
+        self.assertNotIn(0, supervisor._encounter_roles)
+        self.assertEqual(passed.high_risk_vessel_indices, [])
+
+    def test_continue_uses_last_executed_maneuver(self):
+        supervisor, provider = make_supervisor(trigger_mode='fixed', fixed_interval=1)
+        supervisor.update(step=0, **state())
+        supervisor.feedback_execution(-.1,0,0)
+        provider.response = 'Action: a_C'
+        result = supervisor.update(step=1, **state())
         self.assertEqual(result.candidate_action, Action.AC)
-        self.assertEqual(result.final_action, Action.A0)
-        self.assertEqual(result.kdir, 0)
-
-    def test_invalid_previous_candidate_triggers_next_decision(self):
-        supervisor, provider = make_supervisor("Action: a_R")
-        state = dict(risk=[0.8], distance=[1.0], bearing=[0.0], dcpa=[0.2], tcpa=[100.0])
-        supervisor.update(step=1, **state)
-        supervisor.memory.last_valid = False
-        result = supervisor.update(step=2, **state)
-        self.assertTrue(result.triggered)
-        self.assertEqual(provider.calls, 2)
-
-    def test_rule_only_baseline_uses_the_same_action_invalidation_trigger(self):
-        supervisor = RiskTriggeredLLMSupervisor(provider=None, rule_only=True)
-        state = dict(distance=[1.0, 1.1], bearing=[-0.5, 0.0],
-                     dcpa=[0.2, 0.2], tcpa=[100.0, 100.0])
-        supervisor.update(risk=[0.8, 0.29], step=1, **state)
-        second = supervisor.update(risk=[0.8, 0.3], step=2, **state)
-        self.assertEqual(second.trigger_reasons, ["previous_action_invalid"])
-        self.assertEqual(second.final_action, Action.AR)
-        self.assertEqual(supervisor.call_count, 0)
-
-    def test_trigger_history_records_action_and_effective_step(self):
-        supervisor = RiskTriggeredLLMSupervisor(provider=None, rule_only=True)
-        supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
-        event = supervisor.trigger_history[0]
-        self.assertEqual(event["final_action"], Action.AR.value)
-        self.assertEqual(event["kdir"], 1)
-        self.assertEqual(event["effective_step"], 11)
-
-    def test_encounter_type_change_triggers_below_risk_threshold(self):
-        supervisor, provider = make_supervisor(
-            "Rule 14 (head-on), Action: a_R, Explanation: safe."
-        )
-        supervisor.update([0.3], [1.0], [0.0], [0.2], [100.0], step=1)
-
-        result = supervisor.update(
-            risk=[0.1],
-            distance=[3.0],
-            bearing=[1.0],
-            dcpa=[1.0],
-            tcpa=[500.0],
-            step=2,
-        )
-
-        self.assertTrue(result.triggered)
-        self.assertIn("encounter_type_change", result.trigger_reasons)
-        self.assertEqual(provider.calls, 2)
-
-    def test_rule_only_baseline_has_zero_llm_calls(self):
-        supervisor = RiskTriggeredLLMSupervisor(
-            provider=None,
-            rule_only=True,
-            risk_threshold=0.30,
-        )
-
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=1,
-        )
-
-        self.assertTrue(result.triggered)
         self.assertEqual(result.final_action, Action.AR)
-        self.assertEqual(supervisor.call_count, 0)
-
-    def test_triggers_and_maps_starboard_action(self):
-        supervisor, provider = make_supervisor(
-            "Rule 14 (head-on), Action: a_R, Explanation: safe."
-        )
-
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
-
-        self.assertTrue(result.triggered)
         self.assertTrue(result.valid)
-        self.assertEqual(result.final_action, Action.AR)
-        self.assertEqual(result.kdir, 1)
+
+    def test_continue_is_rejected_without_memory(self):
+        supervisor, _ = make_supervisor('Action: a_C', enable_memory=False)
+        self.assertFalse(supervisor.update(step=0, **state()).valid)
+
+    def test_parse_failure_is_counted_per_received_call_not_per_timestep(self):
+        supervisor, provider = make_supervisor('Action: unclear', trigger_mode='fixed', fixed_interval=10)
+        for step in range(5):
+            supervisor.update(step=step, **state())
         self.assertEqual(provider.calls, 1)
+        self.assertEqual(supervisor.parse_failure_count, 1)
+        self.assertIn('prompt', supervisor.trigger_history[0])
 
-    def test_low_risk_after_initial_decision_does_not_call_llm(self):
-        supervisor, provider = make_supervisor(
-            "Rule 14 (head-on), Action: a_R, Explanation: safe."
-        )
+    def test_trigger_records_candidate_and_execution_invalidity_separately(self):
+        supervisor, provider = make_supervisor('Action: unclear')
+        supervisor.update(step=0, **state())
+        supervisor.feedback_execution(-.1,0,0)
+        result = supervisor.update(step=1, **state())
+        self.assertIn('previous_candidate_invalid', result.trigger_reasons)
+        self.assertNotIn('previous_execution_invalid', result.trigger_reasons)
 
-        supervisor.update(
-            risk=[0.1],
-            distance=[3.0],
-            bearing=[0.0],
-            dcpa=[1.0],
-            tcpa=[500.0],
-            step=0,
-        )
-        result = supervisor.update(
-            risk=[0.1],
-            distance=[3.0],
-            bearing=[0.0],
-            dcpa=[1.0],
-            tcpa=[500.0],
-            step=1,
-        )
-
-        self.assertFalse(result.triggered)
-        self.assertEqual(provider.calls, 1)
-
-    def test_invalid_head_on_port_turn_falls_back_to_safe_action(self):
-        supervisor, _ = make_supervisor(
-            "Rule 14 (head-on), Action: a_L, Explanation: unsafe."
-        )
-
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
-
-        self.assertFalse(result.valid)
-        self.assertEqual(result.candidate_action, Action.AL)
-        self.assertEqual(result.final_action, Action.AR)
-        self.assertEqual(result.kdir, 1)
-
-    def test_invalid_action_triggers_the_next_decision(self):
-        supervisor, provider = make_supervisor(
-            "Rule 14 (head-on), Action: unclear, Explanation: malformed."
-        )
-
-        first = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
-        second = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=11,
-        )
-
-        self.assertTrue(first.triggered)
-        self.assertFalse(first.valid)
-        self.assertTrue(second.triggered)
+    def test_secondary_target_invalidates_hold_without_changing_key_target(self):
+        supervisor, provider = make_supervisor('Action: a_0')
+        inputs = dict(distance=[1, 1], bearing=[-math.pi/4, 0], dcpa=[.1, .1], tcpa=[100,100],
+                      target_heading=[-math.pi/2, math.pi], own_heading=0)
+        supervisor.update(step=0, risk=[.8,.2], **inputs)
+        second = supervisor.update(step=1, risk=[.8,.4], **inputs)
+        self.assertIn('previous_execution_invalid', second.trigger_reasons)
+        self.assertTrue(second.rule_conflict)
         self.assertEqual(provider.calls, 2)
 
-    def test_invalid_memory_action_falls_back_for_new_encounter_type(self):
-        supervisor, _ = make_supervisor(
-            "Rule 13 (overtaking), Action: a_0, Explanation: unsafe."
-        )
-        supervisor.memory.last_executed_action = Action.A0
+    def test_unchanged_rule_conflict_does_not_reinvoke_every_tick(self):
+        supervisor, provider = make_supervisor()
+        inputs = dict(risk=[.8,.4],distance=[1,1],bearing=[0,-math.pi/4],dcpa=[.1,.1],
+            tcpa=[100,100],target_heading=[math.pi,-math.pi/2],own_heading=0)
+        for step in range(10):
+            result=supervisor.update(step=step,**inputs)
+        self.assertTrue(result.rule_conflict)
+        self.assertEqual(provider.calls,1)
 
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[3.14],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
+    def test_encounter_array_length_mismatch_is_rejected(self):
+        supervisor, _ = make_supervisor()
+        with self.assertRaises(ValueError):
+            supervisor.update(step=0,**state(target_heading=[]))
 
-        self.assertFalse(result.valid)
+    def test_fixed_schedules_keep_original_call_counts(self):
+        for interval, count in ((100,45),(250,18),(500,9),(750,6)):
+            supervisor, provider = make_supervisor(trigger_mode='fixed', fixed_interval=interval)
+            for step in range(4500):
+                supervisor.update(step=step, **state(risk=[.1]))
+            self.assertEqual(provider.calls, count)
+
+    def test_no_trigger_ablation_has_226_updates(self):
+        supervisor, provider = make_supervisor(trigger_mode='high_level_always', high_level_update_steps=20)
+        for step in range(4500):
+            supervisor.update(step=step, **state(risk=[.1]))
+        self.assertEqual(provider.calls, 226)
+
+    def test_decision_is_effective_before_same_step_integration(self):
+        supervisor, _ = make_supervisor()
+        supervisor.update(step=10, **state())
+        self.assertEqual(supervisor.trigger_history[0]['effective_step'], 10)
+
+    def test_rule_baseline_calls_no_llm(self):
+        supervisor = RiskTriggeredLLMSupervisor(provider='fake', rule_only=True)
+        result = supervisor.update(step=0, **state())
         self.assertEqual(result.final_action, Action.AR)
-        self.assertEqual(result.kdir, 1)
+        self.assertEqual(supervisor.call_count, 0)
 
-    def test_continue_is_invalid_when_memory_is_disabled(self):
-        supervisor, _ = make_supervisor(
-            "Rule 14 (head-on), Action: a_C, Explanation: keep previous."
-        )
-        supervisor.enable_memory = False
+    def test_turn_metrics_distinguish_events_and_reversals(self):
+        self.assertEqual(count_turn_events([0,1,1,0,-1,-1,0,1]), 3)
+        self.assertEqual(count_reverse_switches([0,1,1,0,-1,-1,0,1]), 2)
 
-        result = supervisor.update(
-            risk=[0.3],
-            distance=[1.0],
-            bearing=[0.0],
-            dcpa=[0.2],
-            tcpa=[100.0],
-            step=10,
-        )
-
-        self.assertFalse(result.valid)
-        self.assertEqual(result.final_action, Action.AR)
-
-    def test_multi_target_secondary_validation_blocks_action_invalid_for_other_high_risk_target(self):
-        supervisor, _ = make_supervisor(
-            "Rule 17 (stand-on), Action: a_0, Explanation: keep course."
-        )
-
-        result = supervisor.update(
-            risk=[0.35, 0.31],
-            distance=[1.0, 1.1],
-            bearing=[-0.5, 0.0],
-            dcpa=[0.2, 0.2],
-            tcpa=[100.0, 100.0],
-            step=10,
-        )
-
-        self.assertFalse(result.valid)
-        self.assertEqual(result.candidate_action, Action.A0)
-        self.assertEqual(result.final_action, Action.AR)
-        self.assertEqual(result.kdir, 1)
-        self.assertEqual(result.high_risk_vessel_indices, [0, 1])
-        self.assertEqual(result.validation_encounter_types, ["crossing_stand_on", "head_on"])
+    def test_average_seeds_before_scenes(self):
+        rows = [{'case_number':1,'R_avg':1}, {'case_number':1,'R_avg':3}, {'case_number':2,'R_avg':10}]
+        self.assertEqual(scene_level_values(rows,'R_avg').tolist(), [2,10])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

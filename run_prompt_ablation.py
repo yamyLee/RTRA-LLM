@@ -49,6 +49,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from src.core.experiment_metrics import trajectory_metrics
 from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
 from src.core.experiment_metrics import count_turn_events
 from src.core.paper_experiment_utils import add_scene_summary
@@ -181,10 +182,6 @@ def _compute_aturn(llm_kdir: np.ndarray, baseline_kdir: np.ndarray) -> float:
     return round(agree / total * 100, 2)
 
 
-def _compute_delta_d(llm_dist_m: float, baseline_dist_m: float) -> float:
-    if abs(baseline_dist_m) < 1e-6:
-        return 0.0
-    return round((llm_dist_m - baseline_dist_m) / baseline_dist_m * 100, 3)
 
 
 def _extract_metrics(
@@ -217,15 +214,12 @@ def _extract_metrics(
         "model": results.get("llm_model", ""),
         # ── 核心指标 ──
         "N_call": int(results.get("llm_call_count", 0)),
-        "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
-        "R_max": float(np.max(risk)),
-        "R_avg": _finite_mean(risk),
         "R_avg_positive": _finite_mean(risk[risk > 0]) if (risk > 0).any() else 0.0,
-        "min_dcpa_nm": float(np.min(np.abs(results["dcpa"])) * METERS_TO_NMI),
-        "delta_D_pct": _compute_delta_d(llm_dist_m, baseline_dist_m),
-        "final_dist_nm": llm_dist_m * METERS_TO_NMI,
-        "total_turns": count_turn_events(llm_kdir),
         "trigger_events": int(len(results.get("llm_trigger_history", []))),
+        **trajectory_metrics(results, baseline_results),
+        "archive_path": results.get("archive_path", ""),
+        "output_parse_failure_pct": results.get("output_parse_failure_pct", float("nan")),
+        "execution_rule_violation_pct": results.get("execution_rule_violation_pct", float("nan")),
     }
 
 
@@ -302,6 +296,10 @@ def _write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
 # ── 汇总统计 ──────────────────────────────────────────────────────────────────
 
 NUMERIC_METRICS = [
+    "min_actual_separation_nm", "safety_domain_intrusion_count",
+    "safety_domain_intrusion_duration_s", "collision", "path_length_m",
+    "max_cross_track_m", "route_progress_m", "reverse_switches",
+    "output_parse_failure_pct", "execution_rule_violation_pct",
     "N_call", "A_turn_pct", "R_max", "R_avg", "R_avg_positive",
     "min_dcpa_nm", "delta_D_pct", "final_dist_nm", "total_turns", "trigger_events",
 ]

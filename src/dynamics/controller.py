@@ -1,3 +1,5 @@
+import math
+
 from src.config.paper_parameters import (
     CONTROL_KD_YAW,
     CONTROL_KI_YAW,
@@ -35,7 +37,7 @@ def controller(psi_p, psi, r, v_p, b, ui_psi1, Ts):
     # kd_yaw = 500.0
     # ki_yaw = 0
 
-    e_psi = psi_p - psi
+    e_psi = math.atan2(math.sin(psi_p - psi), math.cos(psi_p - psi))
     ui_psi = ui_psi1 + Ts * e_psi
     ui_psi1 = ui_psi
 

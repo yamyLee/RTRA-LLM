@@ -39,6 +39,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
+from src.core.experiment_metrics import trajectory_metrics
 from src.config.paper_parameters import (
     LLM_RISK_THRESHOLD,
     PAPER_LOW_LEVEL_PLANNER,
@@ -91,10 +92,6 @@ def _distance_from_origin(results: Dict[str, Any]) -> float:
     return float(np.hypot(x[-1], y[-1]))
 
 
-def _compute_delta_d(llm_final_dist_m: float, baseline_final_dist_m: float) -> float:
-    if abs(baseline_final_dist_m) < 1e-12:
-        return 0.0
-    return round((llm_final_dist_m - baseline_final_dist_m) / baseline_final_dist_m * 100, 3)
 
 
 def _case_numbers(values: Optional[Sequence[int]]) -> List[int]:
@@ -186,12 +183,6 @@ def _extract_metrics(
         "sim_steps": steps,
         "interval_steps": interval_steps,
         "interval_seconds": interval_seconds,
-        "R_max": float(np.nanmax(risk)) if risk.size else 0.0,
-        "R_avg": _finite_mean(risk),
-        "min_dcpa_nm": float(np.nanmin(np.abs(np.asarray(results["dcpa"], dtype=float))) * METERS_TO_NMI),
-        "A_turn_pct": _compute_aturn(llm_kdir, baseline_kdir),
-        "delta_D_pct": _compute_delta_d(llm_final_dist_m, baseline_final_dist_m),
-        "final_dist_nm": llm_final_dist_m * METERS_TO_NMI,
         "baseline_dist_nm": baseline_final_dist_m * METERS_TO_NMI,
         "N_call": call_count,
         "trigger_events": int(len(results.get("llm_trigger_history", []))),
@@ -200,7 +191,10 @@ def _extract_metrics(
         "risk_threshold": float(results.get("llm_risk_threshold", LLM_RISK_THRESHOLD)),
         "memory_enabled": bool(results.get("llm_memory_enabled", False)),
         "validator_enabled": bool(results.get("llm_validator_enabled", False)),
-        "total_turns": count_turn_events(llm_kdir),
+        **trajectory_metrics(results, baseline_results),
+        "archive_path": results.get("archive_path", ""),
+        "output_parse_failure_pct": results.get("output_parse_failure_pct", float("nan")),
+        "execution_rule_violation_pct": results.get("execution_rule_violation_pct", float("nan")),
     }
 
 
@@ -419,7 +413,7 @@ def main() -> int:
         "metric_notes": {
             "N_call": "Observed successful LLM calls reported by RiskTriggeredLLMSupervisor.",
             "A_turn_pct": "Sign agreement of kdir with the no-LLM baseline, consistent with run_llm_baseline.py.",
-            "delta_D_pct": "Final distance deviation from the no-LLM baseline; positive means farther from the origin.",
+            "delta_D_pct": "Actual sailed path length deviation from paired VO; interpret with progress and cross-track error.",
         },
     }
     (output_dir / "experiment_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
