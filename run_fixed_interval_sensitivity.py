@@ -413,7 +413,7 @@ def main() -> int:
         "metric_notes": {
             "N_call": "Observed successful LLM calls reported by RiskTriggeredLLMSupervisor.",
             "A_turn_pct": "Sign agreement of kdir with the no-LLM baseline, consistent with run_llm_baseline.py.",
-            "delta_D_pct": "Actual sailed path length deviation from paired VO; interpret with progress and cross-track error.",
+            "delta_D_pct": "100*(d-d_VO)/d_VO, where d=hypot(x[-1],y[-1]) at the last recorded [0,T) sample; rounded to 3 decimals. Endpoint displacement, not sailed path length.",
         },
     }
     (output_dir / "experiment_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

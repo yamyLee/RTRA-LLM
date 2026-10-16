@@ -29,14 +29,37 @@ def simple_trace(positions, target=None):
 
 
 class CommonMetricsTest(unittest.TestCase):
-    def test_path_cost_uses_sailed_segments_not_final_displacement(self):
-        reference=simple_trace([[0,0],[1,0],[2,0]])
-        detour=simple_trace([[0,0],[1,1],[2,0]])
+    def test_paper_distance_distinguishes_equal_length_paths(self):
+        reference=simple_trace([[0,0],[1,0],[2,0],[3,0]])
+        detour=simple_trace([[0,0],[1,0],[1,1],[2,1]])
         value=trajectory_metrics(detour,reference)
-        self.assertAlmostEqual(value['path_length_m'],2*np.sqrt(2))
-        self.assertAlmostEqual(value['delta_D_pct'],100*(np.sqrt(2)-1))
+        self.assertAlmostEqual(value['path_length_m'],3)
+        self.assertAlmostEqual(value['delta_D_pct'],-29.289)
+        self.assertAlmostEqual(value['final_dist_nm'],np.sqrt(2)/1852)
+        self.assertAlmostEqual(value['baseline_dist_nm'],2/1852)
         self.assertAlmostEqual(value['route_progress_m'],2)
         self.assertAlmostEqual(value['max_cross_track_m'],1)
+
+    def test_paper_distance_does_not_charge_extra_length_with_same_endpoint(self):
+        reference=simple_trace([[0,0],[1,0],[2,0],[3,0]])
+        detour=simple_trace([[0,0],[.5,1],[2,0],[3,0]])
+        value=trajectory_metrics(detour,reference)
+        self.assertGreater(value['path_length_m'],trajectory_metrics(reference)['path_length_m'])
+        self.assertEqual(value['delta_D_pct'],0)
+
+    def test_paper_distance_uses_last_recorded_sample_before_final_state(self):
+        reference=simple_trace([[0,0],[1,0],[2,0]])
+        trace=simple_trace([[0,0],[0,2],[100,0]])
+        value=trajectory_metrics(trace,reference)
+        self.assertEqual(value['delta_D_pct'],100)
+        self.assertAlmostEqual(value['final_dist_nm'],2/1852)
+
+    def test_paper_distance_retains_zero_reference_convention(self):
+        reference=simple_trace([[0,0],[0,0],[1,0]])
+        trace=simple_trace([[0,0],[1,1],[2,0]])
+        value=trajectory_metrics(trace,reference)
+        self.assertEqual(value['baseline_dist_nm'],0)
+        self.assertEqual(value['delta_D_pct'],0)
 
     def test_predicted_dcpa_and_actual_range_are_separate(self):
         trace=simple_trace([[0,0],[1,0],[2,0]])
@@ -125,8 +148,8 @@ class CommonMetricsTest(unittest.TestCase):
     def test_paper_runners_export_identical_metric_definitions(self):
         import importlib
         import os
-        reference=simple_trace([[0,0],[1,0],[2,0]])
-        trace=simple_trace([[0,0],[1,1],[2,0]])
+        reference=simple_trace([[0,0],[1,0],[2,0],[3,0]])
+        trace=simple_trace([[0,0],[1,0],[1,1],[2,1]])
         expected=trajectory_metrics(trace,reference)
         condition=dict(id=1,name='test',label='test',paper_row='test',llm=1,
                        disable_memory=False,disable_rule_validator=False,file='test',trigger_mode='risk')
@@ -136,14 +159,18 @@ class CommonMetricsTest(unittest.TestCase):
             prompt=importlib.import_module('run_prompt_ablation')
             fixed=importlib.import_module('run_fixed_interval_sensitivity')
             baseline=importlib.import_module('run_llm_baseline')
+            threshold=importlib.import_module('run_threshold_sweep')
         results=[multi._extract_metrics(trace,reference,1,'qwen','qwen'),
                  module._extract_metrics(trace,reference,1,condition,'qwen'),
                  prompt._extract_metrics(trace,reference,1,condition,'qwen'),
                  baseline._extract_metrics(trace,reference,1,'qwen',250),
+                 threshold._extract_metrics(trace,reference,1,.3,'qwen'),
                  fixed._extract_metrics(trace,reference,case_number=1,provider='qwen',method='test',
-                    schedule='risk',interval_steps=None,configuration='matched',sim_time=2,dt=1)]
+                    schedule='risk',interval_steps=None,configuration='matched',sim_time=3,dt=1)]
         for result in results:
             self.assertAlmostEqual(result['delta_D_pct'],expected['delta_D_pct'])
+            self.assertAlmostEqual(result['final_dist_nm'],expected['final_dist_nm'])
+            self.assertAlmostEqual(result['baseline_dist_nm'],expected['baseline_dist_nm'])
             self.assertEqual(result['A_turn_pct'],expected['A_turn_pct'])
             self.assertEqual(result['metric_schema'],expected['metric_schema'])
 

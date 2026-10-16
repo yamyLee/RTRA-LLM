@@ -58,7 +58,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from src.config.paper_parameters import LLM_RISK_THRESHOLD, PAPER_LOW_LEVEL_PLANNER, PAPER_RANDOM_SEEDS, RANDOM_SEED, SIMULATION_DT_S, SIMULATION_TIME_S
-from src.core.experiment_metrics import count_turn_events
+from src.core.experiment_metrics import count_turn_events, distance_deviation_pct, trajectory_metrics
 from src.core.paper_experiment_utils import add_scene_summary
 
 # ── 项目根目录 ─────────────────────────────────────────────────────────────────
@@ -123,10 +123,8 @@ def _compute_aturn(llm_kdir: np.ndarray, baseline_kdir: np.ndarray) -> float:
 
 
 def _compute_delta_d(llm_dist_m: float, baseline_dist_m: float) -> float:
-    """ΔD：路径效率偏差（%）。"""
-    if abs(baseline_dist_m) < 1e-6:
-        return 0.0
-    return round((llm_dist_m - baseline_dist_m) / baseline_dist_m * 100, 3)
+    """ΔD：原实验的终点径向距离偏差（%），与其他实验共用实现。"""
+    return distance_deviation_pct(llm_dist_m, baseline_dist_m)
 
 
 def _extract_metrics(
@@ -172,6 +170,7 @@ def _extract_metrics(
         "total_turns": count_turn_events(llm_kdir),
         "starboard_turns": int(np.sum(llm_kdir > 0.5)),
         "port_turns": int(np.sum(llm_kdir < -0.5)),
+        **trajectory_metrics(results, baseline_results),
     }
 
 

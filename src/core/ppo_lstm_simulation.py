@@ -139,7 +139,7 @@ def _write_batch_csv(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
         "route_progress_m", "safety_domain_intrusion_count", "safety_domain_intrusion_duration_s",
         "reverse_switches", "execution_rule_violation_pct", "archive_path", "paired_vo_archive_path",
         "case_number", "seed", "R_max", "R_avg", "min_dcpa_nm",
-        "min_actual_separation_nm", "A_turn_pct", "delta_D_pct", "collision",
+        "min_actual_separation_nm", "A_turn_pct", "delta_D_pct", "final_dist_nm", "baseline_dist_nm", "collision",
         "success", "collision_free_episode", "policy_steps", "mean_inference_latency_s", "runtime_s",
         "checkpoint",
     ]

@@ -26,7 +26,24 @@ def count_turn_events(kdir: Sequence[float], threshold: float = 0.1) -> int:
     return int(events)
 
 
-METRIC_SCHEMA = "rtra-2026-10-16-v3"
+METRIC_SCHEMA = "rtra-2026-10-16-v4-paper-distance"
+
+
+def final_sample_distance_m(result):
+    """Paper experiment distance: radius from origin at the last stored sample.
+
+    The original experiments use hypot(x[-1], y[-1]) on the [0,T) trace.
+    This is endpoint displacement, not sailed length or distance to the waypoint;
+    do not append the separately stored state at T when calculating this metric.
+    """
+    return float(np.hypot(result['x'][-1], result['y'][-1]))
+
+
+def distance_deviation_pct(distance_m, reference_distance_m):
+    """Original paper experiment Delta D, including its rounding/zero guard."""
+    if abs(reference_distance_m) < 1e-6:
+        return 0.0
+    return round((distance_m - reference_distance_m) / reference_distance_m * 100, 3)
 
 
 def count_reverse_switches(kdir, threshold=0.1):
@@ -64,6 +81,8 @@ def trajectory_metrics(result, baseline=None):
     is appended for path length, progress, and sampled geometric safety. Domain
     duration is a left-rectangle estimate, with episodes counted per target.
     A_turn is ONLY similarity to a paired VO trajectory, never correctness.
+    Delta D retains the original experiment's last-sample radial-distance
+    comparison with paired VO; actual sailed length is path_length_m only.
     """
     from src.config.paper_parameters import VO_SAFETY_RADIUS_M
     positions = np.column_stack((result['x'], result['y']))
@@ -103,7 +122,7 @@ def trajectory_metrics(result, baseline=None):
         'rms_cross_track_m': float(np.sqrt(np.mean(cross_track ** 2))),
         'route_progress_m': float((endpoints[-1] - endpoints[0]) @ direction),
         'waypoint_distance_m': float(np.linalg.norm(endpoints[-1] - route_end)),
-        'final_dist_nm': chord / 1852,
+        'final_dist_nm': final_sample_distance_m(result) / 1852,
         'total_turns': count_turn_events(turns),
         'reverse_switches': count_reverse_switches(turns),
         'A_turn_pct': float('nan'),
@@ -119,9 +138,10 @@ def trajectory_metrics(result, baseline=None):
             raise ValueError('Paired trajectory time grids must match')
         reference_turns = np.asarray(baseline['kdir'])
         output['A_turn_pct'] = float(100 * np.mean(np.sign(turns) == np.sign(reference_turns)))
-        reference_path = np.vstack((np.column_stack((baseline['x'], baseline['y'])), baseline['final_position_m']))
-        reference_length = np.linalg.norm(np.diff(reference_path, axis=0), axis=1).sum()
-        output['delta_D_pct'] = float(100 * (length / reference_length - 1)) if reference_length > 1e-9 else float('nan')
+        reference_distance = final_sample_distance_m(baseline)
+        output['baseline_dist_nm'] = reference_distance / 1852
+        output['delta_D_pct'] = distance_deviation_pct(
+            final_sample_distance_m(result), reference_distance)
     return output
 
 
